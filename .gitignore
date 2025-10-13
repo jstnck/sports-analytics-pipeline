@@ -57,3 +57,6 @@ htmlcov/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Copilot
+.copilot-instructions.md
