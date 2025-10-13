@@ -1,6 +1,8 @@
-"""ESPN NBA season scraper (package copy).
+"""ESPN NBA season ingest (package copy).
 
-See top-level `scraper.py` for original implementation.
+This module provides helpers to ingest ESPN scoreboard/summary JSON into
+pandas DataFrames. It's a renamed copy of the previous `scraper` module to
+use "ingest" terminology throughout the project.
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ def _make_session(retries: int = 3, backoff_factor: float = 0.5) -> requests.Ses
     session.mount("http://", adapter)
     # polite default User-Agent
     session.headers.update(
-    {"User-Agent": "sports-analytics-pipeline-scraper/0.1 (+https://example)"}
+        {"User-Agent": "sports-analytics-pipeline-ingest/0.1 (+https://example)"}
     )
     return session
 
@@ -240,7 +242,7 @@ def fetch_boxscore_for_event(
     return cast(Dict[str, Any], box)
 
 
-def scrape_boxscores_for_date(
+def ingest_boxscores_for_date(
     dt: date,
     *,
     session: Optional[requests.Session] = None,
@@ -279,7 +281,7 @@ def scrape_boxscores_for_date(
     return out
 
 
-def scrape_season(
+def ingest_season(
     season_end_year: int,
     start: Optional[date] = None,
     end: Optional[date] = None,
@@ -296,7 +298,6 @@ def scrape_season(
 
     if session is None:
         session = _make_session()
-
 
     rows: List[Dict[str, Optional[Union[str, int]]]] = []
     for dt in _date_range(start, end):
@@ -329,23 +330,23 @@ def scrape_season(
     return df[cols]
 
 
-__all__ = ["scrape_season"]
+__all__ = ["ingest_season"]
 
 
-def scrape_schedule(
+def ingest_schedule(
     season_end_year: int,
     start: Optional[date] = None,
     end: Optional[date] = None,
     **kwargs: Any,
 ) -> pd.DataFrame:
-    """Alias for `scrape_season` to make intent explicit (returns schedule rows).
+    """Alias for `ingest_season` to make intent explicit (returns schedule rows).
 
-    Keeps the same signature as `scrape_season` and simply forwards to it.
+    Keeps the same signature as `ingest_season` and simply forwards to it.
     """
-    return scrape_season(season_end_year, start=start, end=end, **kwargs)
+    return ingest_season(season_end_year, start=start, end=end, **kwargs)
 
 
-def scrape_teams_from_schedule(df: pd.DataFrame) -> pd.DataFrame:
+def ingest_teams_from_schedule(df: pd.DataFrame) -> pd.DataFrame:
     """Return a DataFrame of unique teams extracted from a schedule DataFrame.
 
     Columns: name, (city - may be None).
@@ -468,7 +469,7 @@ def _parse_players_from_summary(summary: Dict[str, Any]) -> List[Dict[str, Optio
     return out
 
 
-def scrape_players_for_event(
+def ingest_players_for_event(
     event_id: Union[int, str],
     session: Optional[requests.Session] = None,
     cache_dir: Optional[Union[str, Path]] = "data/raw",
@@ -535,7 +536,7 @@ def scrape_players_for_event(
     return df
 
 
-def scrape_players_for_date(
+def ingest_players_for_date(
     dt: date,
     *,
     session: Optional[requests.Session] = None,
@@ -552,7 +553,7 @@ def scrape_players_for_date(
         ev_id = ev.get("id") or (ev.get("competitions") or [{}])[0].get("id")
         if not ev_id:
             continue
-        df = scrape_players_for_event(ev_id, session=session, cache_dir=cache_dir)
+        df = ingest_players_for_event(ev_id, session=session, cache_dir=cache_dir)
         if not df.empty:
             rows.append(df)
         sleep(delay)
@@ -561,7 +562,7 @@ def scrape_players_for_date(
     return pd.concat(rows, ignore_index=True, sort=False)
 
 
-def scrape_players_for_season(
+def ingest_players_for_season(
     season_end_year: int,
     start: Optional[date] = None,
     end: Optional[date] = None,
@@ -581,18 +582,18 @@ def scrape_players_for_season(
     cur = start
     while cur <= end:
         try:
-            df = scrape_players_for_date(cur, session=session, delay=delay, cache_dir=cache_dir)
+            df = ingest_players_for_date(cur, session=session, delay=delay, cache_dir=cache_dir)
             if not df.empty:
                 rows.append(df)
         except Exception:
-            logger.exception("Failed to scrape players for %s", cur)
+            logger.exception("Failed to ingest players for %s", cur)
         cur = cur + timedelta(days=1)
     if not rows:
         return pd.DataFrame()
     return pd.concat(rows, ignore_index=True, sort=False)
 
 
-def scrape_boxscores_for_season(
+def ingest_boxscores_for_season(
     season_end_year: int,
     start: Optional[date] = None,
     end: Optional[date] = None,
@@ -612,9 +613,9 @@ def scrape_boxscores_for_season(
     cur = start
     while cur <= end:
         try:
-            daily = scrape_boxscores_for_date(cur, session=session, delay=delay, cache_dir=cache_dir)
+            daily = ingest_boxscores_for_date(cur, session=session, delay=delay, cache_dir=cache_dir)
             out.update(daily)
         except Exception:
-            logger.exception("Failed to scrape boxscores for %s", cur)
+            logger.exception("Failed to ingest boxscores for %s", cur)
         cur = cur + timedelta(days=1)
     return out

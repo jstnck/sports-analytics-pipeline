@@ -6,13 +6,13 @@ from typing import Any, Dict, List, Optional
 import json
 import pandas as pd
 
-from sports_analytics_pipeline.scraper import _parse_scoreboard_json, _parse_players_from_summary
+from sports_analytics_pipeline.ingest import _parse_scoreboard_json, _parse_players_from_summary
 
 
 def schedule_from_scoreboard(payload: Dict[str, Any]) -> pd.DataFrame:
 	"""Convert a scoreboard JSON payload to a schedule DataFrame.
 
-	The function delegates to the scraper's JSON parser and returns a DataFrame
+	The function delegates to the ingest module's JSON parser and returns a DataFrame
 	with columns: date, start_time, timestamp_utc, home_team, away_team, venue, event_id.
 	"""
 	rows = _parse_scoreboard_json(payload)

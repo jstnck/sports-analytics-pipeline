@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Optional, cast
+from typing import Optional
 
 import logging
 
-from sports_analytics_pipeline.scraper import (
-    scrape_season,
-    scrape_players_for_date,
-    scrape_boxscores_for_date,
+from sports_analytics_pipeline.ingest import (
+    ingest_season,
+    ingest_players_for_date,
+    ingest_boxscores_for_date,
     _fetch_summary_for_event,
 )
 from sports_analytics_pipeline.storage import (
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 def ingest_season_schedule(season_end_year: int, db_path: Path, *, start: Optional[date] = None, end: Optional[date] = None, cache_dir: Optional[str] = "data/raw") -> None:
     """Scrape a season schedule and ingest into DuckDB."""
     init_db(db_path)
-    df = scrape_season(season_end_year, start=start, end=end, cache_dir=cache_dir)
+    df = ingest_season(season_end_year, start=start, end=end, cache_dir=cache_dir)
     if df.empty:
         logger.info("No schedule rows found for season %s", season_end_year)
         return
@@ -136,7 +136,7 @@ def ingest_date(dt: date, db_path: Path, *, cache_dir: Optional[str] = "data/raw
     init_db(db_path)
 
     # build lookup for event -> away/home/date using schedule for the date
-    schedule_df = scrape_season(dt.year + 1, start=dt, end=dt, cache_dir=cache_dir)
+    schedule_df = ingest_season(dt.year + 1, start=dt, end=dt, cache_dir=cache_dir)
     mapping: dict[str, dict[str, Optional[str]]] = {}
     if not schedule_df.empty:
         for _, row in schedule_df.iterrows():
@@ -149,7 +149,7 @@ def ingest_date(dt: date, db_path: Path, *, cache_dir: Optional[str] = "data/raw
                 }
 
     # players (player box score rows)
-    players_df = scrape_players_for_date(dt, cache_dir=cache_dir)
+    players_df = ingest_players_for_date(dt, cache_dir=cache_dir)
     # enrich players_df with teams/date when missing using the schedule mapping
     if not players_df.empty and "espn_event_id" in players_df.columns:
         def _meta(ev_id: Optional[str]) -> dict[str, Optional[str]]:
@@ -172,7 +172,7 @@ def ingest_date(dt: date, db_path: Path, *, cache_dir: Optional[str] = "data/raw
         ingest_player_box_scores(players_df, db_path=db_path)
 
     # team-level boxscores
-    boxes = scrape_boxscores_for_date(dt, cache_dir=cache_dir)
+    boxes = ingest_boxscores_for_date(dt, cache_dir=cache_dir)
 
     for ev_id, box in boxes.items():
         # try to extract teams/date from cached summary if present (preferred)

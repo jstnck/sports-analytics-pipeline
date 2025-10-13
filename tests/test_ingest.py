@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-from sports_analytics_pipeline.scraper import _parse_scoreboard_json
+from sports_analytics_pipeline.ingest import _parse_scoreboard_json
 
 
 def test_parse_scoreboard_minimal() -> None:
