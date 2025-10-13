@@ -1,5 +1,5 @@
 [project]
-name = "bball-season"
+name = "sports-analytics-pipeline"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
