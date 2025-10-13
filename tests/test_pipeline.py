@@ -5,7 +5,7 @@ from pathlib import Path
 
 import duckdb
 
-from bball_season.pipeline import ingest_date
+from sports_analytics_pipeline.pipeline import ingest_date
 
 
 def write_json(cache_dir: Path, name: str, obj: object) -> None:
@@ -51,6 +51,8 @@ def test_ingest_date_end_to_end(tmp_path: Path) -> None:
     # assert box_score table exists and has at least one row
     tbls = conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='main'").fetchall()
     assert any(r[0] == 'box_score' for r in tbls)
-    count = conn.execute("SELECT COUNT(*) FROM box_score").fetchone()[0]
+    count_res = conn.execute("SELECT COUNT(*) FROM box_score").fetchone()
+    assert count_res is not None
+    count = count_res[0]
     assert count >= 1
     conn.close()

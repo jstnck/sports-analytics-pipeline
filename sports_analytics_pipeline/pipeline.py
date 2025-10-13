@@ -2,23 +2,23 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 import logging
 
-from bball_season.scraper import (
+from sports_analytics_pipeline.scraper import (
     scrape_season,
     scrape_players_for_date,
     scrape_boxscores_for_date,
     _fetch_summary_for_event,
 )
-from bball_season.storage import (
+from sports_analytics_pipeline.storage import (
     init_db,
     ingest_schedule,
     ingest_box_scores,
     ingest_player_box_scores,
 )
-from bball_season.transform import (
+from sports_analytics_pipeline.transform import (
     team_box_from_summary,
 )
 
@@ -113,8 +113,13 @@ def ingest_season_schedule(season_end_year: int, db_path: Path, *, start: Option
 
                 # write back into DataFrame if we found scores
                 if home_score is not None or away_score is not None:
-                    df.at[idx, "home_score"] = home_score
-                    df.at[idx, "away_score"] = away_score
+                    # Use .loc with index label to avoid ambiguous tuple index typing
+                    if idx in df.index:
+                        mask = df.index == idx
+                        if home_score is not None:
+                            df.loc[mask, "home_score"] = home_score
+                        if away_score is not None:
+                            df.loc[mask, "away_score"] = away_score
             except Exception:
                 # be defensive: don't let a single event failure abort the whole ingest
                 logger.exception("Failed to populate scores for event %s", row.get("espn_event_id"))

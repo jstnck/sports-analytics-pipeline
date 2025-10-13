@@ -5,7 +5,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from bball_season.storage import (
+from sports_analytics_pipeline.storage import (
     ingest_schedule,
     ingest_players,
     ingest_box_scores,
@@ -101,21 +101,32 @@ def test_ingest_all(tmp_path: Path) -> None:
 
     # Open DB and assert counts and a sample value
     conn = duckdb.connect(database=str(db_path))
-    schedule_count = conn.execute("SELECT COUNT(*) FROM schedule").fetchone()[0]
+    schedule_res = conn.execute("SELECT COUNT(*) FROM schedule").fetchone()
+    assert schedule_res is not None
+    schedule_count = schedule_res[0]
     assert schedule_count == 1
 
-    players_count = conn.execute("SELECT COUNT(*) FROM players").fetchone()[0]
+    players_res = conn.execute("SELECT COUNT(*) FROM players").fetchone()
+    assert players_res is not None
+    players_count = players_res[0]
     assert players_count == 1
 
-    box_count = conn.execute("SELECT COUNT(*) FROM box_score").fetchone()[0]
+    box_res = conn.execute("SELECT COUNT(*) FROM box_score").fetchone()
+    assert box_res is not None
+    box_count = box_res[0]
     assert box_count == 1
 
-    pbox_count = conn.execute("SELECT COUNT(*) FROM player_box_score").fetchone()[0]
+    pbox_res = conn.execute("SELECT COUNT(*) FROM player_box_score").fetchone()
+    assert pbox_res is not None
+    pbox_count = pbox_res[0]
     assert pbox_count == 1
 
     # spot-check a value
     pts = conn.execute(
-        "SELECT points FROM player_box_score WHERE first_name='LeBron' AND last_name='James'")
-    assert pts.fetchone()[0] == 30
+        "SELECT points FROM player_box_score WHERE first_name='LeBron' AND last_name='James'"
+    )
+    pts_row = pts.fetchone()
+    assert pts_row is not None
+    assert pts_row[0] == 30
 
     conn.close()

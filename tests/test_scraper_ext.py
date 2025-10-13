@@ -6,7 +6,7 @@ import json
 
 import pandas as pd
 
-from bball_season.scraper import (
+from sports_analytics_pipeline.scraper import (
     _date_range,
     _fetch_scoreboard_for_date,
     _fetch_summary_for_event,

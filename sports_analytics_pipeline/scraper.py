@@ -54,7 +54,7 @@ def _make_session(retries: int = 3, backoff_factor: float = 0.5) -> requests.Ses
     session.mount("http://", adapter)
     # polite default User-Agent
     session.headers.update(
-        {"User-Agent": "bball-season-scraper/0.1 (+https://example)"}
+    {"User-Agent": "sports-analytics-pipeline-scraper/0.1 (+https://example)"}
     )
     return session
 
@@ -94,9 +94,9 @@ def _fetch_scoreboard_for_date(
     return payload
 
 
-def _parse_scoreboard_json(payload: Dict[str, Any]) -> List[Dict[str, Optional[str]]]:
+def _parse_scoreboard_json(payload: Dict[str, Any]) -> List[Dict[str, Optional[Union[str, int]]]]:
     """Parse scoreboard JSON into list of game dicts (date,start_time,teams,venue,event_id)."""
-    results: List[Dict[str, Optional[str]]] = []
+    results: List[Dict[str, Optional[Union[str, int]]]] = []
     events = payload.get("events") or []
     for ev in events:
         competitions = ev.get("competitions") or []
@@ -297,7 +297,9 @@ def scrape_season(
     if session is None:
         session = _make_session()
 
-    rows: List[Dict[str, Optional[str]]] = []
+    from typing import Union
+
+    rows: List[Dict[str, Optional[Union[str, int]]]] = []
     for dt in _date_range(start, end):
         try:
             payload = _fetch_scoreboard_for_date(

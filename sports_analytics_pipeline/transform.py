@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 import json
 import pandas as pd
 
-from bball_season.scraper import _parse_scoreboard_json, _parse_players_from_summary
+from sports_analytics_pipeline.scraper import _parse_scoreboard_json, _parse_players_from_summary
 
 
 def schedule_from_scoreboard(payload: Dict[str, Any]) -> pd.DataFrame:

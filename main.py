@@ -6,12 +6,12 @@ def main(run_scrape: bool = False) -> None:
     """
     if run_scrape:
         # Local import to keep startup light when not scraping
-        from bball_season.scraper import scrape_season
+        from sports_analytics_pipeline.scraper import scrape_season
 
         df = scrape_season(2026)
         print(df.head())
     else:
-        print("Hello from bball-season!")
+        print("Hello from sports-analytics-pipeline!")
 
 
 if __name__ == "__main__":

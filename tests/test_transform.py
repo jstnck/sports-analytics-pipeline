@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from bball_season.transform import (
+from sports_analytics_pipeline.transform import (
     schedule_from_scoreboard,
     players_from_summary,
     team_box_from_summary,

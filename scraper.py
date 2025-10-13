@@ -22,7 +22,7 @@ and tested with a small sample JSON in the test suite.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional, cast
 
 import pandas as pd
 import requests
@@ -54,7 +54,7 @@ def _fetch_scoreboard_for_date(dt: date) -> Dict[str, Any]:
     params = {"dates": dt.strftime("%Y%m%d")}
     resp = requests.get(SCOREBOARD_URL, params=params, timeout=15)
     resp.raise_for_status()
-    return resp.json()
+    return cast(Dict[str, Any], resp.json())
 
 
 def _parse_scoreboard_json(payload: Dict[str, Any]) -> List[Dict[str, Optional[str]]]:

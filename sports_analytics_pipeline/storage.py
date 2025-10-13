@@ -1,4 +1,4 @@
-"""DuckDB storage helpers for the bball_season project.
+"""DuckDB storage helpers for the sports_analytics_pipeline project.
 
 This module creates a small relational schema and provides a function to
 ingest a games DataFrame produced by the scraper into normalized tables:

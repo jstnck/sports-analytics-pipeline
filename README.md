@@ -1,10 +1,10 @@
-BBALL Scraper
+Sports Analytics Pipeline
 
-This project scrapes data about the NBA from ESPN.com. It is the firt part of a larger project to use basketball for creating data science and data engineering portolio. 
+This application ingests data about NBA games from ESPN. It is the first step of a large data analytics pipeline.
 
-This is the data ingestion section - using python to scrape data on games, schedules, players, teams, etc. 
+This is the data ingestion section - using python to consume from the ESPN public API, or web-scrape data on games, schedules, players, teams, etc. 
 
-This data will then be stored in a duckdb database for further analysis.
+NBA data will then be minimally transformed and saved in the staging layer of a DuckDB database
 
 ## Development
 
@@ -16,7 +16,7 @@ This project uses `uv` to manage dependencies and a lightweight dev toolchain:
 Install dev tools into the virtual environment:
 
 ```bash
-cd bball-season
+cd sports-analytics-pipeline
 uv add --dev mypy pandas-stubs types-requests ruff
 source .venv/bin/activate
 ```
@@ -29,7 +29,7 @@ ruff format .
 # Lint (shows warnings/errors)
 ruff check .
 # Type check
-python -m mypy bball_season tests
+python -m mypy sports_analytics_pipeline tests
 ```
 
 Follow the coding conventions in `.copilot-instructions.md` (docstrings, type hints, pytest-style tests).
