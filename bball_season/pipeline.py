@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+import logging
+
+from bball_season.scraper import (
+    scrape_season,
+    scrape_players_for_date,
+    scrape_boxscores_for_date,
+    _fetch_summary_for_event,
+)
+from bball_season.storage import (
+    init_db,
+    ingest_schedule,
+    ingest_box_scores,
+    ingest_player_box_scores,
+)
+from bball_season.transform import (
+    team_box_from_summary,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def ingest_season_schedule(season_end_year: int, db_path: Path, *, start: Optional[date] = None, end: Optional[date] = None, cache_dir: Optional[str] = "data/raw") -> None:
+    """Scrape a season schedule and ingest into DuckDB."""
+    init_db(db_path)
+    df = scrape_season(season_end_year, start=start, end=end, cache_dir=cache_dir)
+    if df.empty:
+        logger.info("No schedule rows found for season %s", season_end_year)
+        return
+    # storage.ingest_schedule expects an `espn_event_id` column; the
+    # scraper returns `event_id` so normalize the column name here for
+    # robustness.
+    if "event_id" in df.columns and "espn_event_id" not in df.columns:
+        df = df.rename(columns={"event_id": "espn_event_id"})
+
+    # Ensure columns referenced by the ingest SQL exist (even if NULL).
+    for col in ("home_score", "away_score", "game_type", "status"):
+        if col not in df.columns:
+            df[col] = None
+
+    # For games that should have happened already (UTC), attempt to populate
+    # missing scores by fetching the event summary. This keeps schedule rows
+    # up-to-date at ingest time (past games should include outcomes).
+    now_utc = datetime.now(timezone.utc)
+    def _parse_timestamp(ts: Optional[str]) -> Optional[datetime]:
+        if not ts:
+            return None
+        try:
+            # Normalize trailing Z to +00:00 for fromisoformat
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    # iterate rows and fill missing scores when event time is in the past
+    if not df.empty and "espn_event_id" in df.columns:
+        for idx, row in df.iterrows():
+            try:
+                ev = row.get("espn_event_id")
+                if ev is None:
+                    continue
+
+                # skip if scores already present
+                if (row.get("home_score") is not None) or (row.get("away_score") is not None):
+                    continue
+
+                # determine event datetime: prefer timestamp_utc, fall back to date
+                ts = row.get("timestamp_utc") or row.get("start_time") or row.get("date")
+                ev_dt = _parse_timestamp(ts) if isinstance(ts, str) else None
+                # if no full timestamp, but a date exists, treat end-of-day UTC as event time
+                if ev_dt is None and row.get("date"):
+                    try:
+                        ev_date = datetime.fromisoformat(str(row.get("date"))).date()
+                        # use midnight UTC of that date as a conservative estimate
+                        ev_dt = datetime(ev_date.year, ev_date.month, ev_date.day, tzinfo=timezone.utc)
+                    except Exception:
+                        ev_dt = None
+
+                # only try to populate scores for events that are in the past
+                if ev_dt is None or ev_dt > now_utc:
+                    continue
+
+                # fetch summary and attempt to extract scores
+                try:
+                    summary = _fetch_summary_for_event(str(ev), cache_dir=cache_dir)
+                except Exception:
+                    # couldn't fetch summary; skip fill
+                    continue
+
+                comps = summary.get("competitions") or []
+                if not comps:
+                    continue
+                comp = comps[0]
+                home_score = None
+                away_score = None
+                for comp_team in comp.get("competitors") or []:
+                    score = comp_team.get("score")
+                    try:
+                        score = int(score) if score is not None else None
+                    except Exception:
+                        score = None
+                    if comp_team.get("homeAway") == "home":
+                        home_score = score
+                    elif comp_team.get("homeAway") == "away":
+                        away_score = score
+
+                # write back into DataFrame if we found scores
+                if home_score is not None or away_score is not None:
+                    df.at[idx, "home_score"] = home_score
+                    df.at[idx, "away_score"] = away_score
+            except Exception:
+                # be defensive: don't let a single event failure abort the whole ingest
+                logger.exception("Failed to populate scores for event %s", row.get("espn_event_id"))
+
+    ingest_schedule(df, db_path=db_path)
+
+
+def ingest_date(dt: date, db_path: Path, *, cache_dir: Optional[str] = "data/raw") -> None:
+    """Scrape players and boxscores for a date and ingest into DuckDB.
+
+    The pipeline prefers cached summary JSON when available to extract metadata
+    (teams/date) but will fall back to the scoreboard-derived schedule.
+    """
+    init_db(db_path)
+
+    # build lookup for event -> away/home/date using schedule for the date
+    schedule_df = scrape_season(dt.year + 1, start=dt, end=dt, cache_dir=cache_dir)
+    mapping: dict[str, dict[str, Optional[str]]] = {}
+    if not schedule_df.empty:
+        for _, row in schedule_df.iterrows():
+            eid = str(row.get("event_id")) if row.get("event_id") is not None else None
+            if eid:
+                mapping[eid] = {
+                    "away_team": row.get("away_team"),
+                    "home_team": row.get("home_team"),
+                    "date": row.get("date"),
+                }
+
+    # players (player box score rows)
+    players_df = scrape_players_for_date(dt, cache_dir=cache_dir)
+    # enrich players_df with teams/date when missing using the schedule mapping
+    if not players_df.empty and "espn_event_id" in players_df.columns:
+        def _meta(ev_id: Optional[str]) -> dict[str, Optional[str]]:
+            if ev_id is None:
+                return {"away_team": None, "home_team": None, "date": None}
+            return mapping.get(str(ev_id), {"away_team": None, "home_team": None, "date": None})
+
+        # fill missing columns from mapping
+        for col in ("away_team", "home_team", "date"):
+            if col not in players_df.columns:
+                players_df[col] = players_df["espn_event_id"].apply(lambda e: _meta(e).get(col))
+            else:
+                players_df.loc[players_df[col].isna(), col] = players_df.loc[players_df[col].isna(), "espn_event_id"].apply(lambda e: _meta(e).get(col))
+
+    if not players_df.empty:
+        # remove rows without player names (these are not valid player rows
+        # for the player_box_score table and would violate NOT NULL / PK)
+        if "first_name" in players_df.columns and "last_name" in players_df.columns:
+            players_df = players_df.dropna(subset=["first_name", "last_name"])
+        ingest_player_box_scores(players_df, db_path=db_path)
+
+    # team-level boxscores
+    boxes = scrape_boxscores_for_date(dt, cache_dir=cache_dir)
+
+    for ev_id, box in boxes.items():
+        # try to extract teams/date from cached summary if present (preferred)
+        away = None
+        home = None
+        event_date_str = None
+        try:
+            if cache_dir is not None:
+                cache_path = Path(cache_dir) / f"summary_{ev_id}.json"
+                if cache_path.exists():
+                    import json as _json
+
+                    s = _json.loads(cache_path.read_text(encoding="utf-8"))
+                    comps = s.get("competitions") or []
+                    if comps:
+                        comp = comps[0]
+                        for comp_team in comp.get("competitors") or []:
+                            if comp_team.get("homeAway") == "home":
+                                home = (comp_team.get("team") or {}).get("displayName")
+                            elif comp_team.get("homeAway") == "away":
+                                away = (comp_team.get("team") or {}).get("displayName")
+                    header = s.get("header") or {}
+                    date_str = header.get("competitions") and header["competitions"][0].get("date") if isinstance(header.get("competitions"), list) else None
+                    event_date_str = date_str
+        except Exception:
+            # fallback to schedule mapping
+            meta = mapping.get(ev_id, {})
+            away = meta.get("away_team")
+            home = meta.get("home_team")
+            event_date_str = meta.get("date")
+
+        # if we still don't have teams/date, try a live fetch of the summary
+        # (useful when box dicts are minimal). This will make a network
+        # request when cache_dir is None or cache missing.
+        if (away is None or home is None or event_date_str is None):
+            try:
+                s = _fetch_summary_for_event(ev_id, cache_dir=cache_dir)
+                comps = s.get("competitions") or []
+                if comps:
+                    comp = comps[0]
+                    for comp_team in comp.get("competitors") or []:
+                        if comp_team.get("homeAway") == "home":
+                            home = (comp_team.get("team") or {}).get("displayName")
+                        elif comp_team.get("homeAway") == "away":
+                            away = (comp_team.get("team") or {}).get("displayName")
+                header = s.get("header") or {}
+                date_str = header.get("competitions") and header["competitions"][0].get("date") if isinstance(header.get("competitions"), list) else None
+                if date_str:
+                    event_date_str = date_str
+            except Exception:
+                # swallow; we'll try other fallbacks below
+                pass
+
+        # final fallback: if we still don't have an event date, use the
+        # pipeline's requested date (dt) so ingestion has a non-null date
+        if event_date_str is None:
+            try:
+                event_date_str = dt.isoformat()
+            except Exception:
+                event_date_str = None
+
+        team_df = team_box_from_summary(box, ev_id, event_date=event_date_str, away_team=away, home_team=home)
+        if not team_df.empty:
+            # Ensure the DataFrame has game-level away_team/home_team filled for every row.
+            meta = mapping.get(ev_id, {})
+            game_away = away or meta.get("away_team")
+            game_home = home or meta.get("home_team")
+
+            if game_away and game_home:
+                team_df["away_team"] = game_away
+                team_df["home_team"] = game_home
+                ingest_box_scores(team_df, db_path=db_path)
+            else:
+                logger.warning(
+                    "Skipping ingest for event %s because away/home teams could not be determined",
+                    ev_id,
+                )
+
