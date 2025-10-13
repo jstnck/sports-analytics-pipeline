@@ -127,7 +127,7 @@ def ingest_season_schedule(season_end_year: int, db_path: Path, *, start: Option
     ingest_schedule(df, db_path=db_path)
 
 
-def ingest_date(dt: date, db_path: Path, *, cache_dir: Optional[str] = "data/raw") -> None:
+def ingest_date(dt: date, db_path: Path, *, cache_dir: Optional[str] = "data/raw", delay: float = 0.1) -> None:
     """Scrape players and boxscores for a date and ingest into DuckDB.
 
     The pipeline prefers cached summary JSON when available to extract metadata
@@ -149,7 +149,7 @@ def ingest_date(dt: date, db_path: Path, *, cache_dir: Optional[str] = "data/raw
                 }
 
     # players (player box score rows)
-    players_df = ingest_players_for_date(dt, cache_dir=cache_dir)
+    players_df = ingest_players_for_date(dt, cache_dir=cache_dir, delay=delay)
     # enrich players_df with teams/date when missing using the schedule mapping
     if not players_df.empty and "espn_event_id" in players_df.columns:
         def _meta(ev_id: Optional[str]) -> dict[str, Optional[str]]:
@@ -172,7 +172,7 @@ def ingest_date(dt: date, db_path: Path, *, cache_dir: Optional[str] = "data/raw
         ingest_player_box_scores(players_df, db_path=db_path)
 
     # team-level boxscores
-    boxes = ingest_boxscores_for_date(dt, cache_dir=cache_dir)
+    boxes = ingest_boxscores_for_date(dt, cache_dir=cache_dir, delay=delay)
 
     for ev_id, box in boxes.items():
         # try to extract teams/date from cached summary if present (preferred)
