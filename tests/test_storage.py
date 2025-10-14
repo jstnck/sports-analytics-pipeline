@@ -52,7 +52,7 @@ def test_ingest_all(tmp_path: Path) -> None:
         ]
     )
 
-    # Team box score
+    # Game-level box score (one row per game)
     box_df = pd.DataFrame(
         [
             {
@@ -60,12 +60,12 @@ def test_ingest_all(tmp_path: Path) -> None:
                 "date": "2024-10-04",
                 "away_team": "Warriors",
                 "home_team": "Lakers",
-                "team": "Lakers",
-                "points": 102,
-                "rebounds": 45,
-                "assists": 25,
-                "fouls": 18,
-                "plus_minus": 3,
+                "home_points": 102,
+                "away_points": 99,
+                "home_rebounds": 45,
+                "away_rebounds": 41,
+                "home_assists": 25,
+                "away_assists": 21,
                 "stats_json": "{}",
             }
         ]

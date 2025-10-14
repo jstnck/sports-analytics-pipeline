@@ -145,3 +145,63 @@ def team_box_from_summary(box: Dict[str, Any], espn_event_id: str, *, event_date
 
 	return pd.DataFrame(rows)
 
+
+def game_box_from_summary(
+	box: Dict[str, Any],
+	espn_event_id: str,
+	*,
+	event_date: Optional[str] = None,
+	away_team: Optional[str] = None,
+	home_team: Optional[str] = None,
+) -> pd.DataFrame:
+	"""Aggregate a raw box dict into a single game-level row.
+
+	Returns DataFrame with columns: espn_event_id, date, away_team, home_team,
+	home_points, away_points, home_rebounds, away_rebounds, home_assists,
+	away_assists, stats_json.
+	"""
+	def _stats(rec: Dict[str, Any]) -> Dict[str, Optional[int]]:
+		stats = rec.get("statistics") or rec.get("stats") or {}
+		if isinstance(stats, dict):
+			return {
+				"points": stats.get("points"),
+				"rebounds": stats.get("rebounds"),
+				"assists": stats.get("assists"),
+			}
+		return {"points": None, "rebounds": None, "assists": None}
+
+	teams = box.get("teams") or box.get("teamStats") or []
+	home_vals = {"points": None, "rebounds": None, "assists": None}
+	away_vals = {"points": None, "rebounds": None, "assists": None}
+
+	if isinstance(teams, list) and teams:
+		# Try to match by provided team names
+		for t in teams:
+			tname = t.get("team") or t.get("teamName") or (t.get("team", {}) or {}).get("displayName")
+			s = _stats(t)
+			if home_team and tname == home_team:
+				home_vals = s
+			elif away_team and tname == away_team:
+				away_vals = s
+		# If matching by name failed, but two entries present, assign deterministically
+		if (home_vals["points"] is None and away_vals["points"] is None) and len(teams) >= 2:
+			s0 = _stats(teams[0])
+			s1 = _stats(teams[1])
+			home_vals = s0
+			away_vals = s1
+
+	row = {
+		"espn_event_id": espn_event_id,
+		"date": event_date,
+		"away_team": away_team,
+		"home_team": home_team,
+		"home_points": home_vals.get("points"),
+		"away_points": away_vals.get("points"),
+		"home_rebounds": home_vals.get("rebounds"),
+		"away_rebounds": away_vals.get("rebounds"),
+		"home_assists": home_vals.get("assists"),
+		"away_assists": away_vals.get("assists"),
+		"stats_json": json.dumps(box),
+	}
+	return pd.DataFrame([row])
+

@@ -1,13 +1,16 @@
 """DuckDB storage helpers for the sports_analytics_pipeline project.
 
-This module creates a small relational schema and provides a function to
-ingest a games DataFrame produced by the scraper into normalized tables:
-- teams (team_id, name)
-- venues (venue_id, name)
-- games (game_id, date, start_time, home_team_id, away_team_id, venue_id)
+This module creates a small relational schema and provides helpers to ingest
+DataFrames produced by the ingest layer into normalized tables:
+- teams (name, city)
+- venues (name, city, state)
+- schedule (date, start_time, away_team, home_team, venue, espn_event_id, ...)
+- box_score (team-level box stats)
+- player_box_score (player-level box stats)
 
 The ingest is idempotent for teams and venues (new names are inserted,
-existing ones are preserved). Games are appended.
+existing ones are preserved). Schedule and box score inserts avoid duplicates
+using natural/composite keys.
 """
 
 from __future__ import annotations
@@ -16,89 +19,13 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
+from .schema import init_db
 
 
-def init_db(db_path: str | Path) -> None:
-    """Create the DuckDB database file and required tables if they don't exist.
+def init_db(db_path: str | Path) -> None:  # re-exported for backward compatibility
+    from .schema import init_db as _init
 
-    Args:
-        db_path: file path to the duckdb database file.
-    """
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = duckdb.connect(database=str(db_path))
-    # Create normalized tables according to docs/data-model.md
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS teams (
-            name TEXT PRIMARY KEY,
-            city TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS venues (
-            name TEXT PRIMARY KEY,
-            city TEXT,
-            state TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS players (
-            first_name TEXT,
-            last_name TEXT,
-            date_of_birth DATE,
-            season TEXT,
-            country_of_birth TEXT,
-            PRIMARY KEY (first_name, last_name, date_of_birth)
-        );
-
-        CREATE TABLE IF NOT EXISTS schedule (
-            espn_event_id TEXT,
-            date DATE,
-            start_time TEXT,
-            away_team TEXT REFERENCES teams(name),
-            home_team TEXT REFERENCES teams(name),
-            venue TEXT REFERENCES venues(name),
-            status TEXT,
-            home_score INTEGER,
-            away_score INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            game_type TEXT,
-            UNIQUE(date, away_team, home_team)
-        );
-
-        CREATE TABLE IF NOT EXISTS box_score (
-            espn_event_id TEXT,
-            date DATE,
-            away_team TEXT,
-            home_team TEXT,
-            team TEXT,
-            points INTEGER,
-            rebounds INTEGER,
-            assists INTEGER,
-            fouls INTEGER,
-            plus_minus INTEGER,
-            stats_json TEXT,
-            PRIMARY KEY (date, away_team, home_team, team)
-        );
-
-        CREATE TABLE IF NOT EXISTS player_box_score (
-            espn_event_id TEXT,
-            date DATE,
-            away_team TEXT,
-            home_team TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            team TEXT,
-            minutes_played TEXT,
-            points INTEGER,
-            rebounds INTEGER,
-            assists INTEGER,
-            fouls INTEGER,
-            plus_minus INTEGER,
-            stats_json TEXT,
-            PRIMARY KEY (date, away_team, home_team, first_name, last_name)
-        );
-        """
-    )
-    conn.close()
+    _init(db_path)
 
 
 def ingest_schedule(df: pd.DataFrame, db_path: str | Path = "data/games.duckdb") -> None:
@@ -233,10 +160,11 @@ def ingest_players(df: pd.DataFrame, db_path: str | Path = "data/games.duckdb") 
 
 
 def ingest_box_scores(df: pd.DataFrame, db_path: str | Path = "data/games.duckdb") -> None:
-    """Ingest team-level box score rows into the `box_score` table.
+    """Ingest game-level box score rows into the `box_score` table.
 
-    Expected DataFrame columns: espn_event_id, date, away_team, home_team, team,
-    points, rebounds, assists, fouls, plus_minus, stats_json.
+    Expected DataFrame columns: espn_event_id, date, away_team, home_team,
+    home_points, away_points, home_rebounds, away_rebounds, home_assists,
+    away_assists, stats_json.
     """
     if df.empty:
         return
@@ -244,7 +172,6 @@ def ingest_box_scores(df: pd.DataFrame, db_path: str | Path = "data/games.duckdb
     init_db(db_path)
     conn = duckdb.connect(database=str(db_path))
     conn.register("incoming", df)
-
     conn.execute(
         """
         WITH dedup AS (
@@ -253,28 +180,28 @@ def ingest_box_scores(df: pd.DataFrame, db_path: str | Path = "data/games.duckdb
                 CAST(date AS DATE) AS date_cast,
                 away_team,
                 home_team,
-                team,
-                MAX(points) AS points,
-                MAX(rebounds) AS rebounds,
-                MAX(assists) AS assists,
-                MAX(fouls) AS fouls,
-                MAX(plus_minus) AS plus_minus,
+                MAX(home_points) AS home_points,
+                MAX(away_points) AS away_points,
+                MAX(home_rebounds) AS home_rebounds,
+                MAX(away_rebounds) AS away_rebounds,
+                MAX(home_assists) AS home_assists,
+                MAX(away_assists) AS away_assists,
                 MAX(stats_json) AS stats_json
             FROM incoming
-            GROUP BY CAST(date AS DATE), away_team, home_team, team
+            GROUP BY CAST(date AS DATE), away_team, home_team
         )
-        INSERT INTO box_score(espn_event_id, date, away_team, home_team, team, points, rebounds, assists, fouls, plus_minus, stats_json)
+        INSERT INTO box_score(espn_event_id, date, away_team, home_team, home_points, away_points, home_rebounds, away_rebounds, home_assists, away_assists, stats_json)
         SELECT
             d.espn_event_id,
             d.date_cast,
             d.away_team,
             d.home_team,
-            d.team,
-            d.points,
-            d.rebounds,
-            d.assists,
-            d.fouls,
-            d.plus_minus,
+            d.home_points,
+            d.away_points,
+            d.home_rebounds,
+            d.away_rebounds,
+            d.home_assists,
+            d.away_assists,
             d.stats_json
         FROM dedup d
         WHERE NOT EXISTS (
@@ -282,7 +209,6 @@ def ingest_box_scores(df: pd.DataFrame, db_path: str | Path = "data/games.duckdb
             WHERE b.date = d.date_cast
               AND b.away_team = d.away_team
               AND b.home_team = d.home_team
-              AND b.team = d.team
         )
         """
     )

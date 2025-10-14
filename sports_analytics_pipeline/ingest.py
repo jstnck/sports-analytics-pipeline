@@ -1,8 +1,7 @@
-"""ESPN NBA season ingest (package copy).
+"""ESPN NBA ingest helpers.
 
 This module provides helpers to ingest ESPN scoreboard/summary JSON into
-pandas DataFrames. It's a renamed copy of the previous `scraper` module to
-use "ingest" terminology throughout the project.
+pandas DataFrames.
 """
 
 from __future__ import annotations
@@ -266,17 +265,27 @@ def ingest_boxscores_for_date(
         if ev_id is None:
             continue
         ev_id = str(ev_id)
+        # Determine if a cached summary exists; if so, we'll skip sleeping
+        # after reading to avoid unnecessary delays during backfills.
+        has_cache = False
+        if cache_dir is not None:
+            try:
+                has_cache = (Path(cache_dir) / f"summary_{ev_id}.json").exists()
+            except Exception:
+                has_cache = False
         try:
             box = fetch_boxscore_for_event(ev_id, session=session, cache_dir=cache_dir)
         except Exception as exc:
             logger.info("No boxscore for %s: %s", ev_id, exc)
             # continue to next event
-            sleep(delay)
+            if not has_cache:
+                sleep(delay)
             continue
 
         out[ev_id] = box
-        # be polite between requests
-        sleep(delay)
+        # Be polite between network requests; skip sleeping if served from cache.
+        if not has_cache:
+            sleep(delay)
 
     return out
 
@@ -301,6 +310,14 @@ def ingest_season(
 
     rows: List[Dict[str, Optional[Union[str, int]]]] = []
     for dt in _date_range(start, end):
+        # If a cached scoreboard exists for this date, prefer it and skip sleeping
+        # after the read to speed up backfills.
+        has_cache = False
+        if cache_dir is not None:
+            try:
+                has_cache = (Path(cache_dir) / f"{dt.strftime('%Y%m%d')}.json").exists()
+            except Exception:
+                has_cache = False
         try:
             payload = _fetch_scoreboard_for_date(
                 dt, session=session, cache_dir=cache_dir
@@ -318,9 +335,9 @@ def ingest_season(
 
         rows.extend(_parse_scoreboard_json(payload))
 
-        # Only sleep after a network request (cache reads are fast)
-        # If cache_dir is None we always slept after the request.
-        sleep(delay)
+        # Only sleep after a likely network request; skip if served from cache.
+        if not has_cache:
+            sleep(delay)
 
     df = pd.DataFrame(rows)
     cols = ["date", "start_time", "home_team", "away_team", "venue", "event_id", "home_score", "away_score"]
@@ -553,10 +570,18 @@ def ingest_players_for_date(
         ev_id = ev.get("id") or (ev.get("competitions") or [{}])[0].get("id")
         if not ev_id:
             continue
+        # Check for cached summary for this event to decide on delay
+        has_cache = False
+        if cache_dir is not None:
+            try:
+                has_cache = (Path(cache_dir) / f"summary_{str(ev_id)}.json").exists()
+            except Exception:
+                has_cache = False
         df = ingest_players_for_event(ev_id, session=session, cache_dir=cache_dir)
         if not df.empty:
             rows.append(df)
-        sleep(delay)
+        if not has_cache:
+            sleep(delay)
     if not rows:
         return pd.DataFrame()
     return pd.concat(rows, ignore_index=True, sort=False)

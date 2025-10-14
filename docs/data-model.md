@@ -36,7 +36,7 @@ Columns:
 - game_type (TEXT) — one of: `pre-season`, `regular season`, `playoffs`, `in-season tournament`
 
 ### box_score
-Primary key: composite (date, away_team, home_team, team)
+Primary key: composite (date, away_team, home_team)
 
 Columns (team-level box score):
 - espn_event_id (TEXT) (FK) — external id from ESPN (may be NULL)
@@ -48,8 +48,8 @@ Columns (team-level box score):
 - rebounds (INTEGER)
 - assists (INTEGER)
 - stats_json (TEXT) — raw JSON blob for other metrics
- - fouls (INTEGER)
- - plus_minus (INTEGER)
+- fouls (INTEGER)
+- plus_minus (INTEGER)
 
 ### player_box_score
 Primary key: composite (date, away_team, home_team, first_name, last_name)
