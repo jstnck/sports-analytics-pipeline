@@ -1,9 +1,20 @@
-"""sports_analytics_pipeline package exports.
+"""sports_analytics_pipeline package.
 
-This package mirrors the project modules and exposes a stable import name
-`sports_analytics_pipeline` for consumers.
+NBA data ingestion and analytics pipeline.
 """
 
-from .ingest import ingest_season
+from .ingest import (
+    ingest_season_schedule_dlt,
+    ingest_date_dlt,
+    dagster_ingest_season_schedule,
+    dagster_ingest_daily_data,
+    dagster_backfill_box_scores,
+)
 
-__all__ = ["ingest_season"]
+__all__ = [
+    "ingest_season_schedule_dlt",
+    "ingest_date_dlt", 
+    "dagster_ingest_season_schedule",
+    "dagster_ingest_daily_data",
+    "dagster_backfill_box_scores",
+]

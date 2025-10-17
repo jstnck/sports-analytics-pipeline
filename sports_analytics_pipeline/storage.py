@@ -19,7 +19,6 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
-from .schema import init_db
 
 
 def init_db(db_path: str | Path) -> None:  # re-exported for backward compatibility
@@ -28,7 +27,9 @@ def init_db(db_path: str | Path) -> None:  # re-exported for backward compatibil
     _init(db_path)
 
 
-def ingest_schedule(df: pd.DataFrame, db_path: str | Path = "data/games.duckdb") -> None:
+def ingest_schedule(
+    df: pd.DataFrame, db_path: str | Path = "data/games.duckdb"
+) -> None:
     """Ingest a DataFrame of schedule rows into DuckDB.
 
     Expected DataFrame columns: date, start_time, away_team, home_team, venue,
@@ -159,7 +160,9 @@ def ingest_players(df: pd.DataFrame, db_path: str | Path = "data/games.duckdb") 
     conn.close()
 
 
-def ingest_box_scores(df: pd.DataFrame, db_path: str | Path = "data/games.duckdb") -> None:
+def ingest_box_scores(
+    df: pd.DataFrame, db_path: str | Path = "data/games.duckdb"
+) -> None:
     """Ingest game-level box score rows into the `box_score` table.
 
     Expected DataFrame columns: espn_event_id, date, away_team, home_team,
@@ -217,7 +220,9 @@ def ingest_box_scores(df: pd.DataFrame, db_path: str | Path = "data/games.duckdb
     conn.close()
 
 
-def ingest_player_box_scores(df: pd.DataFrame, db_path: str | Path = "data/games.duckdb") -> None:
+def ingest_player_box_scores(
+    df: pd.DataFrame, db_path: str | Path = "data/games.duckdb"
+) -> None:
     """Ingest player-level box score rows into the `player_box_score` table.
 
     Expected DataFrame columns: espn_event_id, date, away_team, home_team,

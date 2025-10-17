@@ -13,8 +13,7 @@ import duckdb
 
 def _schema_sql() -> str:
     """Return the SQL string that creates all required tables if missing."""
-    return (
-        """
+    return """
         CREATE TABLE IF NOT EXISTS teams (
             name TEXT PRIMARY KEY,
             city TEXT
@@ -83,7 +82,6 @@ def _schema_sql() -> str:
             PRIMARY KEY (date, away_team, home_team, first_name, last_name)
         );
         """
-    )
 
 
 def init_db(db_path: str | Path) -> None:

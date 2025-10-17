@@ -67,8 +67,8 @@ Columns (player-level box score):
 - rebounds (INTEGER)
 - assists (INTEGER)
 - stats_json (TEXT) — raw JSON blob for additional stats
- - fouls (INTEGER)
- - plus_minus (INTEGER)
+- fouls (INTEGER)
+- plus_minus (INTEGER)
 
 ### players
 Primary key: (first_name, last_name, date_of_birth)

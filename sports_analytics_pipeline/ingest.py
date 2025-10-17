@@ -1,31 +1,30 @@
-"""ESPN NBA ingest helpers.
+"""ESPN NBA data ingestion using dlt (data load tool).
 
-This module provides helpers to ingest ESPN scoreboard/summary JSON into
-pandas DataFrames.
+This module provides a complete dlt-based data ingestion pipeline for NBA analytics.
+It handles scoreboard, summary, and player data ingestion with built-in transformations
+to match the expected schema.
+
+Designed for Dagster orchestration with clean function interfaces.
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from time import sleep
-from typing import Any, Dict, Generator, List, Optional, Union, cast
+from typing import Any, Dict, Generator, Iterator, List, Optional
 
 import json
 import logging
 
-import pandas as pd
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import dlt
+from dlt.sources.rest_api import rest_api_source
 
+
+# ESPN API endpoints
 SCOREBOARD_URL = (
     "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
 )
-SUMMARY_URL = (
-    "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
-)
-
+SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
 
 logger = logging.getLogger(__name__)
 
@@ -38,609 +37,776 @@ def _date_range(start: date, end: date) -> Generator[date, None, None]:
         cur += timedelta(days=1)
 
 
-def _make_session(retries: int = 3, backoff_factor: float = 0.5) -> requests.Session:
-    """Return a requests.Session configured with retries and backoff."""
-    session = requests.Session()
-    retry = Retry(
-        total=retries,
-        read=retries,
-        connect=retries,
-        backoff_factor=backoff_factor,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=("GET",),
-        raise_on_status=False,
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    # polite default User-Agent
-    session.headers.update(
-        {"User-Agent": "sports-analytics-pipeline-ingest/0.1 (+https://example)"}
-    )
-    return session
+# Data transformation functions for dlt resources
+def _transform_scoreboard_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform a single ESPN scoreboard event to schedule table format."""
+    competitions = event.get("competitions") or []
+    comp = competitions[0] if competitions else {}
 
-
-def _fetch_scoreboard_for_date(
-    dt: date,
-    session: Optional[requests.Session] = None,
-    cache_dir: Optional[Union[str, Path]] = None,
-) -> Dict[str, Any]:
-    """Fetch scoreboard JSON for a date, optionally using a cache dir."""
-    if cache_dir is not None:
-        cache_path = Path(cache_dir) / f"{dt.strftime('%Y%m%d')}.json"
-        if cache_path.exists():
-            try:
-                data = json.loads(cache_path.read_text(encoding="utf-8"))
-                return cast(Dict[str, Any], data)
-            except Exception:
-                logger.warning("Failed to read cache %s, refetching", cache_path)
-
-    if session is None:
-        session = _make_session()
-
-    params = {"dates": dt.strftime("%Y%m%d")}
-    resp = session.get(SCOREBOARD_URL, params=params, timeout=15)
-    # If the server returned a 4xx/5xx we raise to let caller handle it.
-    resp.raise_for_status()
-    payload = resp.json()
-    payload = cast(Dict[str, Any], payload)
-
-    if cache_dir is not None:
-        try:
-            Path(cache_dir).mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(json.dumps(payload), encoding="utf-8")
-        except Exception:
-            logger.warning("Failed to write cache for %s", dt)
-
-    return payload
-
-
-def _parse_scoreboard_json(payload: Dict[str, Any]) -> List[Dict[str, Optional[Union[str, int]]]]:
-    """Parse scoreboard JSON into list of game dicts (date,start_time,teams,venue,event_id)."""
-    results: List[Dict[str, Optional[Union[str, int]]]] = []
-    events = payload.get("events") or []
-    for ev in events:
-        competitions = ev.get("competitions") or []
-        comp = competitions[0] if competitions else {}
-
-        # Normalize event datetime to UTC and expose both the UTC timestamp
-        # and a derived date (ISO) in UTC to avoid timezone ambiguity.
-        ev_date = ev.get("date") or comp.get("date")
-        if ev_date:
-            try:
-                # fromisoformat doesn't accept trailing 'Z', so normalize to +00:00
-                dt = datetime.fromisoformat(ev_date.replace("Z", "+00:00"))
-                # ensure tz-aware in UTC
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                dt_utc = dt.astimezone(timezone.utc)
-                date_str = dt_utc.date().isoformat()
-                # keep start_time as time in UTC (without offset) for backward compat
-                time_str = dt_utc.time().isoformat()
-                timestamp_utc = dt_utc.isoformat()
-            except Exception:
-                date_str = ev_date
-                time_str = None
-                timestamp_utc = None
-        else:
-            date_str = None
-            time_str = None
-            timestamp_utc = None
-
-        home_team = None
-        away_team = None
-        competitors = comp.get("competitors") or []
-        for team in competitors:
-            team_obj = team.get("team") or {}
-            display_name = team_obj.get("displayName") or team_obj.get("name")
-            if team.get("homeAway") == "home":
-                home_team = display_name
-            elif team.get("homeAway") == "away":
-                away_team = display_name
-
-        # Extract scores when present. ESPN scoreboard JSON often includes a
-        # 'score' field on the competitor entries; capture them as integers
-        # when available so schedule rows can include home/away scores.
-        home_score = None
-        away_score = None
-        for team in competitors:
-            score = team.get("score")
-            if score is None:
-                # sometimes score is nested under 'linescores' or as string; try safe conversion
-                try:
-                    score = int(team.get("score")) if team.get("score") is not None else None
-                except Exception:
-                    score = None
-            if team.get("homeAway") == "home":
-                home_score = int(score) if score is not None else None
-            elif team.get("homeAway") == "away":
-                away_score = int(score) if score is not None else None
-
-        venue = None
-        venue_obj = comp.get("venue") or ev.get("venue")
-        if venue_obj:
-            venue = venue_obj.get("fullName") or venue_obj.get("name")
-
-        # Prefer top-level event id, fall back to competition id when present
-        event_id = ev.get("id") or comp.get("id")
-        if event_id is not None:
-            event_id = str(event_id)
-
-        results.append(
-            {
-                "date": date_str,
-                "start_time": time_str,
-                "timestamp_utc": timestamp_utc,
-                "home_team": home_team,
-                "away_team": away_team,
-                "venue": venue,
-                "event_id": event_id,
-                "home_score": home_score,
-                "away_score": away_score,
-            }
-        )
-
-    return results
-
-
-def _fetch_summary_for_event(
-    event_id: str,
-    session: Optional[requests.Session] = None,
-    cache_dir: Optional[Union[str, Path]] = "data/raw",
-) -> Dict[str, Any]:
-    """Fetch the summary JSON for a single event (cached).
-
-    The ESPN `summary` endpoint typically contains the detailed boxscore
-    under the top-level `boxscore` key. We cache per-event JSON as
-    `data/raw/summary_<event_id>.json`.
-    """
-    if cache_dir is not None:
-        cache_path = Path(cache_dir) / f"summary_{event_id}.json"
-        if cache_path.exists():
-            try:
-                data = json.loads(cache_path.read_text(encoding="utf-8"))
-                return cast(Dict[str, Any], data)
-            except Exception:
-                logger.warning("Failed to read cache %s, refetching", cache_path)
-
-    if session is None:
-        session = _make_session()
-
-    resp = session.get(SUMMARY_URL, params={"event": event_id}, timeout=15)
-    # summary endpoint may return 200 with useful payload or an error status
-    resp.raise_for_status()
-    payload = resp.json()
-    payload = cast(Dict[str, Any], payload)
-
-    if cache_dir is not None:
-        try:
-            Path(cache_dir).mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(json.dumps(payload), encoding="utf-8")
-        except Exception:
-            logger.warning("Failed to write summary cache for %s", event_id)
-
-    return payload
-
-
-def fetch_boxscore_for_event(
-    event_id: Union[int, str],
-    session: Optional[requests.Session] = None,
-    cache_dir: Optional[Union[str, Path]] = "data/raw",
-) -> Dict[str, Any]:
-    """Return the `boxscore` dict for an ESPN event id.
-
-    This helper prefers the `summary` endpoint since the standalone
-    `/boxscore` endpoint may not always be available. Returns the raw
-    `boxscore` mapping when present, otherwise raises ValueError.
-    """
-    ev = str(event_id)
-    summary = _fetch_summary_for_event(ev, session=session, cache_dir=cache_dir)
-    box = summary.get("boxscore")
-    if not isinstance(box, dict):
-        raise ValueError(f"no boxscore available in summary for event {ev}")
-    return cast(Dict[str, Any], box)
-
-
-def ingest_boxscores_for_date(
-    dt: date,
-    *,
-    session: Optional[requests.Session] = None,
-    delay: float = 0.5,
-    cache_dir: Optional[Union[str, Path]] = "data/raw",
-) -> Dict[str, Dict[str, Any]]:
-    """Fetch boxscore payloads for all events on a given date.
-
-    Returns a mapping of event_id -> boxscore dict for events where a
-    boxscore was available. Non-fatal failures (HTTP errors, missing
-    boxscore) are logged and skipped.
-    """
-    if session is None:
-        session = _make_session()
-
-    payload = _fetch_scoreboard_for_date(dt, session=session, cache_dir=cache_dir)
-    events = payload.get("events") or []
-    out: Dict[str, Dict[str, Any]] = {}
-    for ev in events:
-        ev_id = ev.get("id") or (ev.get("competitions") or [{}])[0].get("id")
-        if ev_id is None:
-            continue
-        ev_id = str(ev_id)
-        # Determine if a cached summary exists; if so, we'll skip sleeping
-        # after reading to avoid unnecessary delays during backfills.
-        has_cache = False
-        if cache_dir is not None:
-            try:
-                has_cache = (Path(cache_dir) / f"summary_{ev_id}.json").exists()
-            except Exception:
-                has_cache = False
-        try:
-            box = fetch_boxscore_for_event(ev_id, session=session, cache_dir=cache_dir)
-        except Exception as exc:
-            logger.info("No boxscore for %s: %s", ev_id, exc)
-            # continue to next event
-            if not has_cache:
-                sleep(delay)
-            continue
-
-        out[ev_id] = box
-        # Be polite between network requests; skip sleeping if served from cache.
-        if not has_cache:
-            sleep(delay)
-
-    return out
-
-
-def ingest_season(
-    season_end_year: int,
-    start: Optional[date] = None,
-    end: Optional[date] = None,
-    *,
-    session: Optional[requests.Session] = None,
-    delay: float = 0.5,
-    cache_dir: Optional[Union[str, Path]] = "data/raw",
-) -> pd.DataFrame:
-    """Return a DataFrame of games for the given season (supports caching/delay)."""
-    if start is None:
-        start = date(season_end_year - 1, 10, 1)
-    if end is None:
-        end = date(season_end_year, 6, 30)
-
-    if session is None:
-        session = _make_session()
-
-    rows: List[Dict[str, Optional[Union[str, int]]]] = []
-    for dt in _date_range(start, end):
-        # If a cached scoreboard exists for this date, prefer it and skip sleeping
-        # after the read to speed up backfills.
-        has_cache = False
-        if cache_dir is not None:
-            try:
-                has_cache = (Path(cache_dir) / f"{dt.strftime('%Y%m%d')}.json").exists()
-            except Exception:
-                has_cache = False
-        try:
-            payload = _fetch_scoreboard_for_date(
-                dt, session=session, cache_dir=cache_dir
-            )
-        except requests.HTTPError as exc:
-            # Log and skip this date on HTTP errors (could be rate-limited)
-            logger.warning("Failed to fetch %s: %s", dt, exc)
-            # Sleep here too to avoid tight loops if server is rejecting us
-            sleep(delay)
-            continue
-        except Exception as exc:  # defensive catch-all
-            logger.exception("Unexpected error fetching %s: %s", dt, exc)
-            sleep(delay)
-            continue
-
-        rows.extend(_parse_scoreboard_json(payload))
-
-        # Only sleep after a likely network request; skip if served from cache.
-        if not has_cache:
-            sleep(delay)
-
-    df = pd.DataFrame(rows)
-    cols = ["date", "start_time", "home_team", "away_team", "venue", "event_id", "home_score", "away_score"]
-    for c in cols:
-        if c not in df.columns:
-            df[c] = None
-    return df[cols]
-
-
-__all__ = ["ingest_season"]
-
-
-def ingest_schedule(
-    season_end_year: int,
-    start: Optional[date] = None,
-    end: Optional[date] = None,
-    **kwargs: Any,
-) -> pd.DataFrame:
-    """Alias for `ingest_season` to make intent explicit (returns schedule rows).
-
-    Keeps the same signature as `ingest_season` and simply forwards to it.
-    """
-    return ingest_season(season_end_year, start=start, end=end, **kwargs)
-
-
-def ingest_teams_from_schedule(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a DataFrame of unique teams extracted from a schedule DataFrame.
-
-    Columns: name, (city - may be None).
-    """
-    if df.empty:
-        return pd.DataFrame(columns=["name", "city"])
-    names = pd.Index(pd.concat([df["home_team"], df["away_team"]]).dropna().unique())
-    teams_df = pd.DataFrame({"name": names})
-    teams_df["city"] = None
-    return teams_df
-
-
-def _parse_players_from_summary(summary: Dict[str, Any]) -> List[Dict[str, Optional[Union[str, int]]]]:
-    """Extract player rows from a `summary` payload's boxscore section.
-
-    Returns list of dicts with keys: first_name, last_name, team, minutes_played,
-    points, rebounds, assists, fouls, plus_minus, stats_json (string).
-    This function is defensive and returns an empty list if the expected
-    structures are not present.
-    """
-    out: List[Dict[str, Optional[Union[str, int]]]] = []
-    box = summary.get("boxscore") or {}
-
-    # Common shape: box['players'] is a list of player-stat entries.
-    players = box.get("players")
-    if isinstance(players, list) and players:
-        for p in players:
-            # p may be a dict with 'athlete' or nested structures
-            athlete = p.get("athlete") or p.get("player")
-            team = p.get("team") or p.get("teamName") or (p.get("athlete") or {}).get("team")
-            # athlete may have displayName/fullName or firstName/lastName
-            first = None
-            last = None
-            if isinstance(athlete, dict):
-                first = athlete.get("firstName") or athlete.get("displayName")
-                last = athlete.get("lastName")
-                # try full name split if needed
-                if not last and first and " " in first:
-                    parts = first.split(" ")
-                    first = parts[0]
-                    last = " ".join(parts[1:])
-
-            # fallback: look for 'name' field
-            if not first and isinstance(p, dict):
-                name = p.get("name") or p.get("fullName")
-                if isinstance(name, str) and " " in name:
-                    parts = name.split(" ")
-                    first = parts[0]
-                    last = " ".join(parts[1:])
-
-            minutes = None
-            points = None
-            rebounds = None
-            assists = None
-            fouls = None
-            plus_minus = None
-
-            # try common stats locations
-            stats = p.get("stats") or p.get("statistics")
-            if isinstance(stats, list):
-                # stats may be list of dicts with 'name' and 'value'
-                for s in stats:
-                    k = s.get("name") if isinstance(s, dict) else None
-                    v = s.get("value") if isinstance(s, dict) else None
-                    if k and v is not None:
-                        lk = k.lower()
-                        if "min" in lk and minutes is None:
-                            minutes = str(v)
-                        elif "pts" in lk and points is None:
-                            try:
-                                points = int(v)
-                            except Exception:
-                                points = None
-                        elif "reb" in lk and rebounds is None:
-                            try:
-                                rebounds = int(v)
-                            except Exception:
-                                rebounds = None
-                        elif "ast" in lk and assists is None:
-                            try:
-                                assists = int(v)
-                            except Exception:
-                                assists = None
-                        elif "fouls" in lk or "pf" in lk:
-                            try:
-                                fouls = int(v)
-                            except Exception:
-                                fouls = None
-                        elif "plus" in lk or "+/-" in lk:
-                            try:
-                                plus_minus = int(v)
-                            except Exception:
-                                plus_minus = None
-
-            # stats_json fallback
-            stats_json = None
-            try:
-                stats_json = json.dumps(p.get("stats") or p.get("statistics") or p)
-            except Exception:
-                stats_json = None
-
-            out.append(
-                {
-                    "first_name": first,
-                    "last_name": last,
-                    "team": team if isinstance(team, str) else None,
-                    "minutes_played": minutes,
-                    "points": points,
-                    "rebounds": rebounds,
-                    "assists": assists,
-                    "fouls": fouls,
-                    "plus_minus": plus_minus,
-                    "stats_json": stats_json,
-                    # allow caller to attach date/teams/event id
-                    "date": None,
-                    "espn_event_id": None,
-                }
-            )
-
-    return out
-
-
-def ingest_players_for_event(
-    event_id: Union[int, str],
-    session: Optional[requests.Session] = None,
-    cache_dir: Optional[Union[str, Path]] = "data/raw",
-) -> pd.DataFrame:
-    """Return a DataFrame of player box rows for an event using the summary endpoint.
-
-    The DataFrame columns follow the `player_box_score` doc schema.
-    """
-    ev = str(event_id)
-    try:
-        summary = _fetch_summary_for_event(ev, session=session, cache_dir=cache_dir)
-    except Exception as exc:
-        logger.info("Failed to fetch summary for %s: %s", ev, exc)
-        return pd.DataFrame()
-
-    players = _parse_players_from_summary(summary)
-    if not players:
-        return pd.DataFrame()
-    df = pd.DataFrame(players)
-    # ensure columns exist
-    for c in ["first_name", "last_name", "team", "minutes_played", "points", "rebounds", "assists", "fouls", "plus_minus", "stats_json"]:
-        if c not in df.columns:
-            df[c] = None
-
-    # attach event/date/teams if available and normalize to UTC timestamp
-    header = summary.get("header") or {}
-    # try to extract date and teams from summary header competitions
-    date_str = header.get("competitions") and header["competitions"][0].get("date") if isinstance(header.get("competitions"), list) else None
+    # Extract and normalize event datetime
+    ev_date = event.get("date") or comp.get("date")
+    date_str = None
+    time_str = None
     timestamp_utc = None
-    if date_str:
+
+    if ev_date:
         try:
-            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(ev_date.replace("Z", "+00:00"))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             dt_utc = dt.astimezone(timezone.utc)
-            df["date"] = dt_utc.date().isoformat()
+            date_str = dt_utc.date().isoformat()
+            time_str = dt_utc.time().isoformat()
             timestamp_utc = dt_utc.isoformat()
         except Exception:
-            df["date"] = date_str
+            date_str = ev_date
+            time_str = None
             timestamp_utc = None
-    else:
-        df["date"] = None
 
-    # try teams from summary competitions
-    comps = summary.get("competitions") or []
-    if comps:
-        comp = comps[0]
-        # find away/home
-        away = None
-        home = None
-        for comp_team in comp.get("competitors") or []:
-            if comp_team.get("homeAway") == "home":
-                home = (comp_team.get("team") or {}).get("displayName")
-            elif comp_team.get("homeAway") == "away":
-                away = (comp_team.get("team") or {}).get("displayName")
-        df["away_team"] = away
-        df["home_team"] = home
-    else:
-        df["away_team"] = None
-        df["home_team"] = None
+    # Extract teams and scores
+    home_team = None
+    away_team = None
+    home_score = None
+    away_score = None
 
-    df["espn_event_id"] = ev
-    df["timestamp_utc"] = timestamp_utc
-    return df
+    competitors = comp.get("competitors") or []
+    for team in competitors:
+        team_obj = team.get("team") or {}
+        display_name = team_obj.get("displayName") or team_obj.get("name")
 
-
-def ingest_players_for_date(
-    dt: date,
-    *,
-    session: Optional[requests.Session] = None,
-    delay: float = 0.5,
-    cache_dir: Optional[Union[str, Path]] = "data/raw",
-) -> pd.DataFrame:
-    """Fetch players for all events on a date and return a combined DataFrame."""
-    if session is None:
-        session = _make_session()
-    payload = _fetch_scoreboard_for_date(dt, session=session, cache_dir=cache_dir)
-    events = payload.get("events") or []
-    rows: List[pd.DataFrame] = []
-    for ev in events:
-        ev_id = ev.get("id") or (ev.get("competitions") or [{}])[0].get("id")
-        if not ev_id:
-            continue
-        # Check for cached summary for this event to decide on delay
-        has_cache = False
-        if cache_dir is not None:
+        # Extract score
+        score = team.get("score")
+        if score is not None:
             try:
-                has_cache = (Path(cache_dir) / f"summary_{str(ev_id)}.json").exists()
+                score = int(score)
             except Exception:
-                has_cache = False
-        df = ingest_players_for_event(ev_id, session=session, cache_dir=cache_dir)
-        if not df.empty:
-            rows.append(df)
-        if not has_cache:
-            sleep(delay)
-    if not rows:
-        return pd.DataFrame()
-    return pd.concat(rows, ignore_index=True, sort=False)
+                score = None
+
+        if team.get("homeAway") == "home":
+            home_team = display_name
+            home_score = score
+        elif team.get("homeAway") == "away":
+            away_team = display_name
+            away_score = score
+
+    # Extract venue
+    venue = None
+    venue_obj = comp.get("venue") or event.get("venue")
+    if venue_obj:
+        venue = venue_obj.get("fullName") or venue_obj.get("name")
+
+    # Get event ID
+    event_id = str(event.get("id") or comp.get("id") or "")
+
+    # Determine game status and type
+    status = comp.get("status", {}).get("type", {}).get("name") or "unknown"
+    game_type = "regular season"  # Default, could be enhanced based on event metadata
+
+    return {
+        "espn_event_id": event_id,
+        "date": date_str,
+        "start_time": time_str,
+        "timestamp_utc": timestamp_utc,
+        "away_team": away_team,
+        "home_team": home_team,
+        "venue": venue,
+        "status": status,
+        "home_score": home_score,
+        "away_score": away_score,
+        "game_type": game_type,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
-def ingest_players_for_season(
+def _extract_teams_from_schedule(
+    schedule_records: List[Dict[str, Any]],
+) -> Iterator[Dict[str, Any]]:
+    """Extract unique teams from schedule records."""
+    teams = set()
+    for record in schedule_records:
+        if record.get("home_team"):
+            teams.add(record["home_team"])
+        if record.get("away_team"):
+            teams.add(record["away_team"])
+
+    for team_name in teams:
+        yield {
+            "name": team_name,
+            "city": None,  # Could be enhanced to parse city from team name
+        }
+
+
+def _extract_venues_from_schedule(
+    schedule_records: List[Dict[str, Any]],
+) -> Iterator[Dict[str, Any]]:
+    """Extract unique venues from schedule records."""
+    venues = set()
+    for record in schedule_records:
+        if record.get("venue"):
+            venues.add(record["venue"])
+
+    for venue_name in venues:
+        yield {
+            "name": venue_name,
+            "city": None,  # Could be enhanced based on venue metadata
+            "state": None,
+        }
+
+
+def _transform_player_stats(
+    player_data: Dict[str, Any],
+    event_id: str,
+    game_date: str,
+    away_team: str,
+    home_team: str,
+) -> Dict[str, Any]:
+    """Transform player statistics to player_box_score table format."""
+    # Extract athlete info
+    athlete = player_data.get("athlete") or player_data.get("player") or {}
+    first_name = athlete.get("firstName") or athlete.get("displayName") or ""
+    last_name = athlete.get("lastName") or ""
+
+    # Handle full name split if needed
+    if not last_name and first_name and " " in first_name:
+        parts = first_name.split(" ")
+        first_name = parts[0]
+        last_name = " ".join(parts[1:])
+
+    # Get player's team
+    team = player_data.get("team") or athlete.get("team")
+    if isinstance(team, dict):
+        team = team.get("displayName") or team.get("name")
+
+    # Extract stats
+    stats = player_data.get("stats") or player_data.get("statistics") or []
+
+    minutes_played = None
+    points = None
+    rebounds = None
+    assists = None
+    fouls = None
+    plus_minus = None
+
+    if isinstance(stats, list):
+        for stat in stats:
+            if not isinstance(stat, dict):
+                continue
+            stat_name = (stat.get("name") or "").lower()
+            stat_value = stat.get("value")
+
+            if "min" in stat_name and minutes_played is None:
+                minutes_played = str(stat_value) if stat_value is not None else None
+            elif "pts" in stat_name or "points" in stat_name:
+                try:
+                    points = int(stat_value) if stat_value is not None else None
+                except Exception:
+                    points = None
+            elif "reb" in stat_name or "rebounds" in stat_name:
+                try:
+                    rebounds = int(stat_value) if stat_value is not None else None
+                except Exception:
+                    rebounds = None
+            elif "ast" in stat_name or "assists" in stat_name:
+                try:
+                    assists = int(stat_value) if stat_value is not None else None
+                except Exception:
+                    assists = None
+            elif "fouls" in stat_name or "pf" in stat_name:
+                try:
+                    fouls = int(stat_value) if stat_value is not None else None
+                except Exception:
+                    fouls = None
+            elif "plus" in stat_name or "+/-" in stat_name:
+                try:
+                    plus_minus = int(stat_value) if stat_value is not None else None
+                except Exception:
+                    plus_minus = None
+
+    return {
+        "espn_event_id": event_id,
+        "date": game_date,
+        "away_team": away_team,
+        "home_team": home_team,
+        "first_name": first_name,
+        "last_name": last_name,
+        "team": team,
+        "minutes_played": minutes_played,
+        "points": points,
+        "rebounds": rebounds,
+        "assists": assists,
+        "stats_json": json.dumps(player_data),
+        "fouls": fouls,
+        "plus_minus": plus_minus,
+    }
+
+
+@dlt.resource(
+    name="schedule",
+    write_disposition="merge",
+    primary_key=["date", "away_team", "home_team"],
+)
+def schedule_resource(start_date: date, end_date: date) -> Iterator[Dict[str, Any]]:
+    """dlt resource for NBA schedule data with transformation to schema format."""
+    from typing import cast
+    from dlt.sources.rest_api import RESTAPIConfig
+
+    # Configure REST API source for scoreboard data
+    resources: List[Dict[str, Any]] = []
+
+    # Create resources for each date
+    for i, dt in enumerate(_date_range(start_date, end_date)):
+        resources.append(
+            {
+                "name": f"scoreboard_{i:03d}",
+                "endpoint": {
+                    "path": "scoreboard",
+                    "params": {"dates": dt.strftime("%Y%m%d")},
+                    "paginator": None,
+                    "data_selector": "$",
+                },
+            }
+        )
+
+    source_config = cast(RESTAPIConfig, {
+        "client": {
+            "base_url": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba",
+            "headers": {
+                "User-Agent": "sports-analytics-pipeline-dlt/0.1 (+https://example.com)"
+            },
+        },
+        "resources": resources,
+    })
+
+    # Get the REST API source
+    api_source = rest_api_source(source_config)
+
+    # Process each resource and transform events
+    for resource in api_source.resources.values():
+        for scoreboard_data in resource:
+            events = scoreboard_data.get("events") or []
+            for event in events:
+                yield _transform_scoreboard_event(event)
+
+
+@dlt.resource(name="teams", write_disposition="merge", primary_key="name")
+def teams_resource(start_date: date, end_date: date) -> Iterator[Dict[str, Any]]:
+    """dlt resource for teams data extracted from schedule."""
+
+    # Collect all schedule records first to extract teams
+    schedule_records = list(schedule_resource(start_date, end_date))
+
+    # Extract and yield unique teams
+    yield from _extract_teams_from_schedule(schedule_records)
+
+
+@dlt.resource(name="venues", write_disposition="merge", primary_key="name")
+def venues_resource(start_date: date, end_date: date) -> Iterator[Dict[str, Any]]:
+    """dlt resource for venues data extracted from schedule."""
+
+    # Collect all schedule records first to extract venues
+    schedule_records = list(schedule_resource(start_date, end_date))
+
+    # Extract and yield unique venues
+    yield from _extract_venues_from_schedule(schedule_records)
+
+
+@dlt.resource(
+    name="player_box_score",
+    write_disposition="merge",
+    primary_key=["date", "away_team", "home_team", "first_name", "last_name"],
+)
+def player_box_score_resource(target_date: date) -> Iterator[Dict[str, Any]]:
+    """dlt resource for player box score data."""
+    from typing import cast
+    from dlt.sources.rest_api import RESTAPIConfig
+
+    # First get schedule for the date to find events
+    schedule_records = list(schedule_resource(target_date, target_date))
+
+    # Configure REST API source for summary data
+    resources: List[Dict[str, Any]] = []
+
+    # Create resources for each event on this date
+    event_mapping: Dict[str, Dict[str, Any]] = {}
+    for i, record in enumerate(schedule_records):
+        event_id = record.get("espn_event_id")
+        if event_id:
+            resources.append(
+                {
+                    "name": f"summary_{i:03d}",
+                    "endpoint": {
+                        "path": "summary",
+                        "params": {"event": event_id},
+                        "paginator": None,
+                        "data_selector": "$",
+                    },
+                }
+            )
+            event_mapping[f"summary_{i:03d}"] = record
+
+    if not resources:
+        return
+
+    source_config = cast(RESTAPIConfig, {
+        "client": {
+            "base_url": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba",
+            "headers": {
+                "User-Agent": "sports-analytics-pipeline-dlt/0.1 (+https://example.com)"
+            },
+        },
+        "resources": resources,
+    })
+
+    # Get the REST API source
+    api_source = rest_api_source(source_config)
+
+    # Process each summary and extract player stats
+    for resource_name, resource in api_source.resources.items():
+        if resource_name not in event_mapping:
+            continue
+
+        game_info = event_mapping[resource_name]
+        event_id = game_info["espn_event_id"]
+        game_date = game_info["date"]
+        away_team = game_info["away_team"]
+        home_team = game_info["home_team"]
+
+        for summary_data in resource:
+            # Extract players from boxscore
+            boxscore = summary_data.get("boxscore") or {}
+            players = boxscore.get("players") or []
+
+            for player_data in players:
+                if not isinstance(player_data, dict):
+                    continue
+
+                # Transform and yield player data
+                player_record = _transform_player_stats(
+                    player_data, event_id, game_date, away_team, home_team
+                )
+
+                # Only yield if we have valid player names
+                if player_record.get("first_name") and player_record.get("last_name"):
+                    yield player_record
+
+
+@dlt.resource(
+    name="box_score",
+    write_disposition="merge",
+    primary_key=["date", "away_team", "home_team"],
+)
+def box_score_resource(target_date: date) -> Iterator[Dict[str, Any]]:
+    """dlt resource for game-level box score data (aggregated by game, not team)."""
+    from typing import cast
+    from dlt.sources.rest_api import RESTAPIConfig
+
+    # First get schedule for the date to find events
+    schedule_records = list(schedule_resource(target_date, target_date))
+
+    # Configure REST API source for summary data
+    resources: List[Dict[str, Any]] = []
+
+    # Create resources for each event on this date
+    event_mapping: Dict[str, Dict[str, Any]] = {}
+    for i, record in enumerate(schedule_records):
+        event_id = record.get("espn_event_id")
+        if event_id:
+            resources.append(
+                {
+                    "name": f"summary_{i:03d}",
+                    "endpoint": {
+                        "path": "summary",
+                        "params": {"event": event_id},
+                        "paginator": None,
+                        "data_selector": "$",
+                    },
+                }
+            )
+            event_mapping[f"summary_{i:03d}"] = record
+
+    if not resources:
+        return
+
+    source_config = cast(RESTAPIConfig, {
+        "client": {
+            "base_url": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba",
+            "headers": {
+                "User-Agent": "sports-analytics-pipeline-dlt/0.1 (+https://example.com)"
+            },
+        },
+        "resources": resources,
+    })
+
+    # Get the REST API source
+    api_source = rest_api_source(source_config)
+
+    # Process each summary and create game-level box score records
+    for resource_name, resource in api_source.resources.items():
+        if resource_name not in event_mapping:
+            continue
+
+        game_info = event_mapping[resource_name]
+        event_id = game_info["espn_event_id"]
+        game_date = game_info["date"]
+        away_team = game_info["away_team"]
+        home_team = game_info["home_team"]
+
+        for summary_data in resource:
+            # Extract teams from boxscore and aggregate into game-level record
+            boxscore = summary_data.get("boxscore") or {}
+            teams = boxscore.get("teams") or boxscore.get("teamStats") or []
+
+            # Initialize stats for home and away teams
+            home_points = None
+            away_points = None
+            home_rebounds = None
+            away_rebounds = None
+            home_assists = None
+            away_assists = None
+
+            # Process team data to extract home/away stats
+            for team_data in teams:
+                if not isinstance(team_data, dict):
+                    continue
+
+                team_name = (
+                    (team_data.get("team") or {}).get("displayName")
+                    if isinstance(team_data.get("team"), dict)
+                    else team_data.get("team")
+                )
+                stats = team_data.get("statistics") or team_data.get("stats") or {}
+
+                if isinstance(stats, dict):
+                    points = stats.get("points")
+                    rebounds = stats.get("rebounds")
+                    assists = stats.get("assists")
+
+                    # Assign to home or away based on team name match
+                    if team_name == home_team:
+                        home_points = points
+                        home_rebounds = rebounds
+                        home_assists = assists
+                    elif team_name == away_team:
+                        away_points = points
+                        away_rebounds = rebounds
+                        away_assists = assists
+
+            # If we couldn't match by team name but have 2 teams, assign deterministically
+            if (home_points is None and away_points is None) and len(teams) >= 2:
+                # First team = home, second team = away (fallback)
+                if len(teams) >= 1:
+                    stats = teams[0].get("statistics") or teams[0].get("stats") or {}
+                    if isinstance(stats, dict):
+                        home_points = stats.get("points")
+                        home_rebounds = stats.get("rebounds")
+                        home_assists = stats.get("assists")
+
+                if len(teams) >= 2:
+                    stats = teams[1].get("statistics") or teams[1].get("stats") or {}
+                    if isinstance(stats, dict):
+                        away_points = stats.get("points")
+                        away_rebounds = stats.get("rebounds")
+                        away_assists = stats.get("assists")
+
+            # Create game-level box score record matching the schema
+            yield {
+                "espn_event_id": event_id,
+                "date": game_date,
+                "away_team": away_team,
+                "home_team": home_team,
+                "home_points": home_points,
+                "away_points": away_points,
+                "home_rebounds": home_rebounds,
+                "away_rebounds": away_rebounds,
+                "home_assists": home_assists,
+                "away_assists": away_assists,
+                "stats_json": json.dumps(boxscore),
+            }
+
+
+def ingest_season_schedule_dlt(
     season_end_year: int,
+    db_path: str | Path,
+    *,
     start: Optional[date] = None,
     end: Optional[date] = None,
-    *,
-    session: Optional[requests.Session] = None,
-    delay: float = 0.5,
-    cache_dir: Optional[Union[str, Path]] = "data/raw",
-) -> pd.DataFrame:
-    """Fetch players for all events in a season date range."""
+) -> None:
+    """Ingest NBA season schedule data using dlt.
+
+    This replaces the functionality of pipeline.ingest_season_schedule().
+    Creates schedule, teams, and venues tables with proper schema.
+
+    Args:
+        season_end_year: NBA season end year (e.g., 2025 for 2024-25 season)
+        db_path: Path to DuckDB database file
+        start: Optional start date (defaults to Oct 1 of season start year)
+        end: Optional end date (defaults to Jun 30 of season end year)
+    """
     if start is None:
         start = date(season_end_year - 1, 10, 1)
     if end is None:
         end = date(season_end_year, 6, 30)
-    if session is None:
-        session = _make_session()
-    rows: List[pd.DataFrame] = []
-    cur = start
-    while cur <= end:
-        try:
-            df = ingest_players_for_date(cur, session=session, delay=delay, cache_dir=cache_dir)
-            if not df.empty:
-                rows.append(df)
-        except Exception:
-            logger.exception("Failed to ingest players for %s", cur)
-        cur = cur + timedelta(days=1)
-    if not rows:
-        return pd.DataFrame()
-    return pd.concat(rows, ignore_index=True, sort=False)
+
+    logger.info(f"Ingesting season schedule from {start} to {end}")
+
+    # Create dlt pipeline with DuckDB destination
+    pipeline = dlt.pipeline(
+        pipeline_name="nba_schedule",
+        destination=dlt.destinations.duckdb(str(db_path)),
+        dataset_name="main",  # Use main schema to match existing tables
+    )
+
+    # Run the pipeline with schedule, teams, and venues resources
+    info = pipeline.run(
+        [
+            schedule_resource(start, end),
+            teams_resource(start, end),
+            venues_resource(start, end),
+        ]
+    )
+
+    # Log results
+    logger.info(f"Schedule pipeline completed. Loaded {len(info.loads_ids)} loads.")
+    if hasattr(info, 'has_failed_jobs') and info.has_failed_jobs:
+        logger.error("Pipeline had failed jobs - check dlt logs for details")
 
 
-def ingest_boxscores_for_season(
+def ingest_date_dlt(
+    target_date: date,
+    db_path: str | Path,
+    *,
+    delay: float = 0.1,  # Kept for API compatibility but dlt handles rate limiting
+) -> None:
+    """Ingest NBA data for a specific date using dlt.
+
+    This replaces the functionality of pipeline.ingest_date().
+    Creates player_box_score and box_score tables for the given date.
+
+    Args:
+        target_date: Date to fetch data for
+        db_path: Path to DuckDB database file
+        delay: Delay parameter (maintained for compatibility, dlt handles rate limiting)
+    """
+    logger.info(f"Ingesting data for date {target_date}")
+
+    # Create dlt pipeline with DuckDB destination
+    pipeline = dlt.pipeline(
+        pipeline_name="nba_daily",
+        destination=dlt.destinations.duckdb(str(db_path)),
+        dataset_name="main",  # Use main schema to match existing tables
+    )
+
+    # Run the pipeline with player and team box score resources
+    info = pipeline.run(
+        [
+            player_box_score_resource(target_date),
+            box_score_resource(target_date),
+        ]
+    )
+
+    # Log results
+    logger.info(f"Daily pipeline completed. Loaded {len(info.loads_ids)} loads.")
+    if hasattr(info, 'has_failed_jobs') and info.has_failed_jobs:
+        logger.error("Pipeline had failed jobs - check dlt logs for details")
+
+
+def backfill_box_scores_dlt(
     season_end_year: int,
+    db_path: str | Path,
+    *,
     start: Optional[date] = None,
     end: Optional[date] = None,
-    *,
-    session: Optional[requests.Session] = None,
-    delay: float = 0.5,
-    cache_dir: Optional[Union[str, Path]] = "data/raw",
-) -> Dict[str, Dict[str, Any]]:
-    """Fetch boxscores for every event in a season and return mapping event_id -> box dict."""
+    delay: float = 0.1,
+    skip_existing: bool = True,
+) -> None:
+    """Backfill team-level box scores using dlt.
+
+    This replaces the functionality of pipeline.backfill_box_scores_monthly().
+    Processes dates individually but with efficient dlt batching and error handling.
+
+    Args:
+        season_end_year: NBA season end year (e.g., 2025 for 2024-25)
+        db_path: Path to DuckDB database file
+        start: Optional start date (defaults to Oct 1 of season start year)
+        end: Optional end date (defaults to Jun 30 of season end year)
+        delay: Delay parameter (maintained for compatibility)
+        skip_existing: If True, skip dates already present in box_score table
+    """
     if start is None:
         start = date(season_end_year - 1, 10, 1)
     if end is None:
         end = date(season_end_year, 6, 30)
-    if session is None:
-        session = _make_session()
-    out: Dict[str, Dict[str, Any]] = {}
-    cur = start
-    while cur <= end:
+
+    logger.info(f"Backfilling box scores from {start} to {end}")
+
+    # Check existing dates if skip_existing is True
+    existing_dates: set[str] = set()
+    if skip_existing:
         try:
-            daily = ingest_boxscores_for_date(cur, session=session, delay=delay, cache_dir=cache_dir)
-            out.update(daily)
-        except Exception:
-            logger.exception("Failed to ingest boxscores for %s", cur)
-        cur = cur + timedelta(days=1)
-    return out
+            import duckdb
+
+            conn = duckdb.connect(str(db_path))
+            rows = conn.execute(
+                "SELECT DISTINCT date FROM main.box_score WHERE date BETWEEN ? AND ?",
+                [start.isoformat(), end.isoformat()],
+            ).fetchall()
+            conn.close()
+
+            for (d,) in rows:
+                if isinstance(d, str):
+                    existing_dates.add(d)
+                elif isinstance(d, (datetime, date)):
+                    existing_dates.add(
+                        (d if isinstance(d, date) else d.date()).isoformat()
+                    )
+
+        except Exception as e:
+            logger.warning(f"Could not check existing dates: {e}")
+            existing_dates = set()
+
+    # Process each date
+    processed_count = 0
+    error_count = 0
+
+    for current_date in _date_range(start, end):
+        if skip_existing and current_date.isoformat() in existing_dates:
+            logger.debug(f"Skipping {current_date} (already exists)")
+            continue
+
+        try:
+            ingest_date_dlt(current_date, db_path, delay=delay)
+            processed_count += 1
+            logger.info(f"Processed {current_date} ({processed_count} completed)")
+
+        except Exception as e:
+            error_count += 1
+            logger.error(f"Failed to process {current_date}: {e}")
+
+    logger.info(
+        f"Backfill completed: {processed_count} dates processed, {error_count} errors"
+    )
+
+
+# Dagster-compatible interface functions
+def dagster_ingest_season_schedule(
+    season_end_year: int, db_path: str | Path
+) -> Dict[str, Any]:
+    """Dagster asset function for season schedule ingestion.
+
+    Returns:
+        Dict with ingestion metadata for Dagster tracking
+    """
+    start_time = datetime.now(timezone.utc)
+
+    try:
+        ingest_season_schedule_dlt(season_end_year, db_path)
+
+        return {
+            "status": "success",
+            "season_end_year": season_end_year,
+            "duration_seconds": (
+                datetime.now(timezone.utc) - start_time
+            ).total_seconds(),
+            "message": f"Successfully ingested schedule for season ending {season_end_year}",
+        }
+    except Exception as e:
+        logger.exception(f"Failed to ingest season schedule: {e}")
+        return {
+            "status": "failed",
+            "season_end_year": season_end_year,
+            "duration_seconds": (
+                datetime.now(timezone.utc) - start_time
+            ).total_seconds(),
+            "error": str(e),
+        }
+
+
+def dagster_ingest_daily_data(target_date: date, db_path: str | Path) -> Dict[str, Any]:
+    """Dagster asset function for daily data ingestion.
+
+    Returns:
+        Dict with ingestion metadata for Dagster tracking
+    """
+    start_time = datetime.now(timezone.utc)
+
+    try:
+        ingest_date_dlt(target_date, db_path)
+
+        return {
+            "status": "success",
+            "target_date": target_date.isoformat(),
+            "duration_seconds": (
+                datetime.now(timezone.utc) - start_time
+            ).total_seconds(),
+            "message": f"Successfully ingested data for {target_date}",
+        }
+    except Exception as e:
+        logger.exception(f"Failed to ingest daily data: {e}")
+        return {
+            "status": "failed",
+            "target_date": target_date.isoformat(),
+            "duration_seconds": (
+                datetime.now(timezone.utc) - start_time
+            ).total_seconds(),
+            "error": str(e),
+        }
+
+
+def dagster_backfill_box_scores(
+    season_end_year: int,
+    db_path: str | Path,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> Dict[str, Any]:
+    """Dagster asset function for box score backfill.
+
+    Returns:
+        Dict with backfill metadata for Dagster tracking
+    """
+    start_time = datetime.now(timezone.utc)
+
+    try:
+        backfill_box_scores_dlt(
+            season_end_year, db_path, start=start_date, end=end_date, skip_existing=True
+        )
+
+        return {
+            "status": "success",
+            "season_end_year": season_end_year,
+            "start_date": start_date.isoformat() if start_date else None,
+            "end_date": end_date.isoformat() if end_date else None,
+            "duration_seconds": (
+                datetime.now(timezone.utc) - start_time
+            ).total_seconds(),
+            "message": f"Successfully backfilled box scores for season ending {season_end_year}",
+        }
+    except Exception as e:
+        logger.exception(f"Failed to backfill box scores: {e}")
+        return {
+            "status": "failed",
+            "season_end_year": season_end_year,
+            "start_date": start_date.isoformat() if start_date else None,
+            "end_date": end_date.isoformat() if end_date else None,
+            "duration_seconds": (
+                datetime.now(timezone.utc) - start_time
+            ).total_seconds(),
+            "error": str(e),
+        }
+
+
+__all__ = [
+    # Core dlt pipeline functions
+    "ingest_season_schedule_dlt",
+    "ingest_date_dlt",
+    "backfill_box_scores_dlt",
+    # Dagster-compatible interface
+    "dagster_ingest_season_schedule",
+    "dagster_ingest_daily_data",
+    "dagster_backfill_box_scores",
+    # dlt resources (for advanced users)
+    "schedule_resource",
+    "teams_resource",
+    "venues_resource",
+    "player_box_score_resource",
+    "box_score_resource",
+]
