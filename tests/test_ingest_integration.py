@@ -13,9 +13,9 @@ from unittest.mock import Mock, patch
 
 
 from sports_analytics_pipeline.ingest import (
-    ingest_season_schedule_dlt,
-    ingest_date_dlt,
-    backfill_box_scores_dlt,
+    ingest_season_schedule,
+    ingest_date,
+    backfill_box_scores,
 )
 
 
@@ -23,7 +23,7 @@ class TestDltIngestionFunctions:
     """Test main dlt ingestion functions with mocked data."""
 
     @patch("sports_analytics_pipeline.ingest.rest_api_source")
-    def test_ingest_season_schedule_dlt_basic(self, mock_rest_api_source) -> None:
+    def test_ingest_season_schedule_basic(self, mock_rest_api_source) -> None:
         """Test season schedule ingestion with minimal mock data."""
         # Mock the REST API source and response
         mock_resource = Mock()
@@ -77,7 +77,7 @@ class TestDltIngestionFunctions:
             end_date = date(2024, 10, 15)
 
             # Should not raise an exception
-            ingest_season_schedule_dlt(
+            ingest_season_schedule(
                 season_end_year=2025,
                 db_path=str(db_path),
                 start=start_date,
@@ -89,7 +89,7 @@ class TestDltIngestionFunctions:
 
     @patch("sports_analytics_pipeline.ingest.rest_api_source")
     @patch("sports_analytics_pipeline.ingest.schedule_resource")
-    def test_ingest_date_dlt_basic(
+    def test_ingest_date_basic(
         self, mock_schedule_resource, mock_rest_api_source
     ) -> None:
         """Test daily data ingestion with minimal mock data."""
@@ -146,28 +146,28 @@ class TestDltIngestionFunctions:
             target_date = date(2024, 10, 15)
 
             # Should not raise an exception
-            ingest_date_dlt(target_date=target_date, db_path=str(db_path))
+            ingest_date(target_date=target_date, db_path=str(db_path))
 
             # Verify schedule resource was called
             assert mock_schedule_resource.called
 
-    def test_backfill_box_scores_dlt_date_range(self) -> None:
+    def test_backfill_box_scores_date_range(self) -> None:
         """Test that backfill function handles date ranges correctly."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             db_path = Path(tmp_dir) / "test.duckdb"
 
             # Test with custom date range
             with patch(
-                "sports_analytics_pipeline.ingest.ingest_date_dlt"
+                "sports_analytics_pipeline.ingest.ingest_date"
             ) as mock_ingest:
-                backfill_box_scores_dlt(
+                backfill_box_scores(
                     season_end_year=2025,
                     db_path=str(db_path),
                     start=date(2024, 10, 15),
                     end=date(2024, 10, 16),  # 2 days
                 )
 
-                # Should call ingest_date_dlt for each day
+                # Should call ingest_date for each day
                 assert mock_ingest.call_count == 2
 
                 # Check the dates passed
@@ -175,15 +175,15 @@ class TestDltIngestionFunctions:
                 assert calls[0][0][0] == date(2024, 10, 15)  # First positional arg
                 assert calls[1][0][0] == date(2024, 10, 16)  # First positional arg
 
-    def test_backfill_box_scores_dlt_default_dates(self) -> None:
+    def test_backfill_box_scores_default_dates(self) -> None:
         """Test that backfill function uses correct default date range."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             db_path = Path(tmp_dir) / "test.duckdb"
 
             with patch(
-                "sports_analytics_pipeline.ingest.ingest_date_dlt"
+                "sports_analytics_pipeline.ingest.ingest_date"
             ) as mock_ingest:
-                backfill_box_scores_dlt(
+                backfill_box_scores(
                     season_end_year=2025,
                     db_path=str(db_path),
                 )

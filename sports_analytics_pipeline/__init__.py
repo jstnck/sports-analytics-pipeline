@@ -4,15 +4,15 @@ NBA data ingestion and analytics pipeline.
 """
 
 from .ingest import (
-    ingest_season_schedule_dlt,
-    ingest_date_dlt,
-    backfill_box_scores_dlt,
+    ingest_season_schedule,
+    ingest_date,
+    backfill_box_scores,
 )
 from .schema import init_db
 
 __all__ = [
-    "ingest_season_schedule_dlt",
-    "ingest_date_dlt", 
-    "backfill_box_scores_dlt",
+    "ingest_season_schedule",
+    "ingest_date",
+    "backfill_box_scores",
     "init_db",
 ]

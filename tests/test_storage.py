@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 import duckdb
 
 from sports_analytics_pipeline.ingest import (
-    ingest_season_schedule_dlt,
+    ingest_season_schedule,
 )
 
 
@@ -60,7 +60,7 @@ def test_dlt_pipeline_creates_database_and_tables() -> None:
             mock_rest_api.return_value = mock_source
 
             # Run the season schedule ingestion
-            ingest_season_schedule_dlt(
+            ingest_season_schedule(
                 season_end_year=2025,
                 db_path=str(db_path),
                 start=date(2024, 10, 15),

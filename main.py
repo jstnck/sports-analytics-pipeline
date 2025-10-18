@@ -14,9 +14,9 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from sports_analytics_pipeline.ingest import (
-    ingest_season_schedule_dlt,
-    ingest_date_dlt,
-    backfill_box_scores_dlt,
+    ingest_season_schedule,
+    ingest_date,
+    backfill_box_scores,
 )
 from sports_analytics_pipeline.schema import init_db
 
@@ -84,6 +84,14 @@ Available tables: schedule, teams, venues, box_score, player_box_score
              "If not specified, all applicable tables will be ingested.",
     )
 
+    # API rate limiting
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.5,
+        help="Base delay between API calls in seconds (default: 0.5, min: 0.1, max: 5.0)",
+    )
+
     # Demo mode
     parser.add_argument(
         "--demo",
@@ -144,7 +152,7 @@ Available tables: schedule, teams, venues, box_score, player_box_score
 
     # Handle demo mode
     if args.demo:
-        run_demo(args.db_path, selected_tables)
+        run_demo(args.db_path, selected_tables, delay=args.delay)
         return
 
     # Validate that one operation is specified (if not demo or init-db)
@@ -169,7 +177,7 @@ Available tables: schedule, teams, venues, box_score, player_box_score
             logger.info(
                 f"Ingesting season schedule for season ending {args.season_schedule}"
             )
-            ingest_season_schedule_dlt(args.season_schedule, db_path, selected_tables)
+            ingest_season_schedule(args.season_schedule, db_path, selected_tables)
             logger.info("Season schedule ingestion completed successfully")
 
         elif args.date:
@@ -177,7 +185,7 @@ Available tables: schedule, teams, venues, box_score, player_box_score
             logger.info(f"Ingesting data for date {target_date}")
             if selected_tables:
                 logger.info(f"Tables to ingest: {', '.join(sorted(selected_tables))}")
-            ingest_date_dlt(target_date, db_path, selected_tables)
+            ingest_date(target_date, db_path, selected_tables)
             logger.info("Daily ingestion completed successfully")
 
         elif args.backfill:
@@ -192,8 +200,9 @@ Available tables: schedule, teams, venues, box_score, player_box_score
             if selected_tables:
                 logger.info(f"Tables to ingest: {', '.join(sorted(selected_tables))}")
 
-            backfill_box_scores_dlt(
-                args.backfill, db_path, start=start_date, end=end_date, tables=selected_tables
+            backfill_box_scores(
+                args.backfill, db_path, start=start_date, end=end_date, 
+                tables=selected_tables, delay=args.delay
             )
             logger.info("Box score backfill completed successfully")
 
@@ -202,7 +211,7 @@ Available tables: schedule, teams, venues, box_score, player_box_score
         raise
 
 
-def run_demo(db_path: str, selected_tables: set[str] | None = None) -> None:
+def run_demo(db_path: str, selected_tables: set[str] | None = None, delay: float = 0.5) -> None:
     """Run a quick demonstration of the dlt pipeline."""
     logger.info("Running dlt pipeline demo...")
 
@@ -217,13 +226,13 @@ def run_demo(db_path: str, selected_tables: set[str] | None = None) -> None:
     current_season_end = today.year + 1 if today.month >= 7 else today.year
     if selected_tables:
         logger.info(f"Demo: Tables to ingest: {', '.join(sorted(selected_tables))}")
-    ingest_season_schedule_dlt(current_season_end, db_path_obj, selected_tables)
+    ingest_season_schedule(current_season_end, db_path_obj, selected_tables)
 
     logger.info("Demo: Ingesting daily data for recent dates...")
     for demo_date in dates_to_ingest:
         logger.info(f"  Processing {demo_date}")
         try:
-            ingest_date_dlt(demo_date, db_path_obj, selected_tables)
+            ingest_date(demo_date, db_path_obj, selected_tables, delay=delay)
         except Exception as e:
             logger.warning(f"  Failed to process {demo_date}: {e}")
 

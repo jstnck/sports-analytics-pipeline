@@ -26,7 +26,7 @@ class TestCLIArgumentParsing:
         """Test valid table names are accepted."""
         valid_tables = ['box_score', 'player_box_score']
         
-        with patch('main.ingest_date_dlt') as mock_ingest:
+        with patch('main.ingest_date') as mock_ingest:
             with patch('sys.argv', ['main.py', '--date', '2024-10-23', '--tables', ','.join(valid_tables)]):
                 main.main()
                 # Check that the function was called with the correct table set
@@ -46,7 +46,7 @@ class TestCLITableSelection:
 
     def test_date_ingestion_with_table_selection(self) -> None:
         """Test date ingestion with specific tables."""
-        with patch('main.ingest_date_dlt') as mock_ingest:
+        with patch('main.ingest_date') as mock_ingest:
             with patch('sys.argv', ['main.py', '--date', '2024-10-23', '--tables', 'box_score,player_box_score']):
                 main.main()
                 
@@ -58,12 +58,12 @@ class TestCLITableSelection:
 
     def test_backfill_with_table_selection(self) -> None:
         """Test backfill with specific tables."""
-        with patch('main.backfill_box_scores_dlt') as mock_backfill:
+        with patch('main.backfill_box_scores') as mock_backfill:
             with patch('sys.argv', ['main.py', '--backfill', '2025', '--start', '2024-10-01', 
                                   '--end', '2024-10-31', '--tables', 'box_score']):
                 main.main()
                 
-                # Check that backfill_box_scores_dlt was called with correct arguments
+                # Check that backfill_box_scores was called with correct arguments
                 mock_backfill.assert_called_once()
                 args, kwargs = mock_backfill.call_args
                 

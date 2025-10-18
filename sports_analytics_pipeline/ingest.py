@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Dict, Generator, Iterator, List, Optional
 
 import logging
+import time
+from urllib.error import HTTPError, URLError
 
 import dlt
 from dlt.sources.rest_api import rest_api_source
@@ -33,9 +35,110 @@ NBA_SEASON_START_DAY = 1
 NBA_SEASON_END_MONTH = 6  # June
 NBA_SEASON_END_DAY = 30
 
+# API Rate limiting configuration
+DEFAULT_API_DELAY = 0.5  # Default delay between API calls in seconds
+MIN_API_DELAY = 0.1      # Minimum delay (for light usage)
+MAX_API_DELAY = 5.0      # Maximum delay (for heavy/bulk operations)
+BURST_LIMIT = 100         # Number of requests before enforcing longer delay
+BURST_COOLDOWN = 1.0     # Longer delay after burst limit
+
 # TODO: Handling covid bubble season dates
 
 logger = logging.getLogger(__name__)
+
+
+# Error handling and retry utilities
+class IngestionError(Exception):
+    """Custom exception for ingestion-related errors."""
+    pass
+
+
+class APIError(IngestionError):
+    """Exception raised for API-related errors."""
+    pass
+
+
+class DataValidationError(IngestionError):
+    """Exception raised for data validation errors."""
+    pass
+
+
+class RateLimiter:
+    """Smart rate limiter for API calls with burst protection."""
+    
+    def __init__(self, base_delay: float = DEFAULT_API_DELAY, burst_limit: int = BURST_LIMIT):
+        self.base_delay = base_delay
+        self.burst_limit = burst_limit
+        self.request_count = 0
+        self.last_request_time = 0.0
+        
+    def wait_if_needed(self) -> None:
+        """Wait if necessary to respect rate limits."""
+        current_time = time.time()
+        
+        # Calculate time since last request
+        time_since_last = current_time - self.last_request_time
+        
+        # Determine appropriate delay
+        if self.request_count >= self.burst_limit:
+            # Use burst cooldown after hitting burst limit
+            required_delay = BURST_COOLDOWN
+            self.request_count = 0  # Reset burst counter
+            logger.debug(f"Burst limit reached, using {BURST_COOLDOWN}s cooldown")
+        else:
+            required_delay = self.base_delay
+            
+        # Wait if we haven't waited long enough
+        if time_since_last < required_delay:
+            wait_time = required_delay - time_since_last
+            logger.debug(f"Rate limiting: waiting {wait_time:.2f}s")
+            time.sleep(wait_time)
+            
+        self.request_count += 1
+        self.last_request_time = time.time()
+
+
+# Global rate limiter instance
+_rate_limiter = RateLimiter()
+
+
+def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff: float = 2.0) -> Any:
+    """Decorator to retry function calls with exponential backoff.
+    
+    Args:
+        max_retries: Maximum number of retry attempts
+        delay: Initial delay between retries in seconds
+        backoff: Multiplier for delay after each retry
+    """
+    def decorator(func: Any) -> Any:
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            last_exception = None
+            current_delay = delay
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except (HTTPError, URLError, ConnectionError, TimeoutError) as e:
+                    last_exception = e
+                    if attempt == max_retries:
+                        logger.error(f"Function {func.__name__} failed after {max_retries} retries: {e}")
+                        raise APIError(f"API request failed after {max_retries} retries: {e}") from e
+                    
+                    logger.warning(f"Attempt {attempt + 1} failed for {func.__name__}: {e}. Retrying in {current_delay:.1f}s...")
+                    time.sleep(current_delay)
+                    current_delay *= backoff
+                except Exception as e:
+                    # For non-retryable exceptions, fail immediately
+                    logger.error(f"Non-retryable error in {func.__name__}: {e}")
+                    raise
+                    
+            # This shouldn't be reached, but just in case
+            if last_exception:
+                raise last_exception
+            else:
+                raise APIError("Retry decorator failed unexpectedly")
+        return wrapper
+    return decorator
 
 
 def _date_range(start: date, end: date) -> Generator[date, None, None]:
@@ -392,7 +495,8 @@ def box_score_resource(target_date: date) -> Iterator[Dict[str, Any]]:
             }
 
 
-def ingest_season_schedule_dlt(
+@retry_on_failure(max_retries=3, delay=1.0, backoff=2.0)
+def ingest_season_schedule(
     season_end_year: int,
     db_path: str | Path,
     tables: Optional[set[str]] = None,
@@ -456,12 +560,13 @@ def ingest_season_schedule_dlt(
         logger.error("Pipeline had failed jobs - check dlt logs for details")
 
 
-def ingest_date_dlt(
+@retry_on_failure(max_retries=3, delay=1.0, backoff=2.0)
+def ingest_date(
     target_date: date,
     db_path: str | Path,
     tables: Optional[set[str]] = None,
     *,
-    delay: float = 0.1,
+    delay: float = DEFAULT_API_DELAY,
 ) -> None:
     """Ingest NBA data for a specific date using dlt.
 
@@ -471,7 +576,7 @@ def ingest_date_dlt(
         target_date: Date to fetch data for
         db_path: Path to DuckDB database file
         tables: Optional set of tables to ingest. Available: {'box_score', 'player_box_score'}
-        delay: Request delay in seconds (dlt handles rate limiting automatically)
+        delay: Base delay between API calls in seconds
     """
     # Default to all daily tables if none specified
     if tables is None:
@@ -487,6 +592,10 @@ def ingest_date_dlt(
 
     logger.info(f"Ingesting data for date {target_date}")
     logger.info(f"Selected tables: {', '.join(sorted(selected_tables))}")
+    
+    # Configure rate limiter for this operation
+    _rate_limiter.base_delay = max(MIN_API_DELAY, min(delay, MAX_API_DELAY))
+    logger.debug(f"Rate limiter configured with {_rate_limiter.base_delay}s base delay")
 
     # Create dlt pipeline with DuckDB destination
     pipeline = dlt.pipeline(
@@ -510,14 +619,14 @@ def ingest_date_dlt(
         logger.error("Pipeline had failed jobs - check dlt logs for details")
 
 
-def backfill_box_scores_dlt(
+def backfill_box_scores(
     season_end_year: int,
     db_path: str | Path,
     *,
     start: Optional[date] = None,
     end: Optional[date] = None,
     tables: Optional[set[str]] = None,
-    delay: float = 0.1,
+    delay: float = DEFAULT_API_DELAY,
     skip_existing: bool = True,
 ) -> None:
     """Backfill team-level box scores using dlt.
@@ -588,13 +697,29 @@ def backfill_box_scores_dlt(
             continue
 
         try:
-            ingest_date_dlt(current_date, db_path, selected_tables, delay=delay)
+            ingest_date(current_date, db_path, selected_tables, delay=delay)
             processed_count += 1
             logger.info(f"Processed {current_date} ({processed_count} completed)")
 
+        except APIError as e:
+            error_count += 1
+            logger.error(f"API error processing {current_date}: {e}")
+            # For API errors, we might want to continue with other dates
+            continue
+            
+        except DataValidationError as e:
+            error_count += 1
+            logger.error(f"Data validation error for {current_date}: {e}")
+            # Continue processing other dates even if one has bad data
+            continue
+            
         except Exception as e:
             error_count += 1
-            logger.error(f"Failed to process {current_date}: {e}")
+            logger.error(f"Unexpected error processing {current_date}: {e}", exc_info=True)
+            
+            # For unexpected errors, we might want to fail fast or continue
+            # Let's continue but log the full traceback for debugging
+            continue
 
     logger.info(
         f"Backfill completed: {processed_count} dates processed, {error_count} errors"
@@ -602,10 +727,20 @@ def backfill_box_scores_dlt(
 
 
 __all__ = [
-    # Core dlt pipeline functions
-    "ingest_season_schedule_dlt",
-    "ingest_date_dlt",
-    "backfill_box_scores_dlt",
+    # Core pipeline functions
+    "ingest_season_schedule",
+    "ingest_date",
+    "backfill_box_scores",
+    # Exception classes
+    "IngestionError",
+    "APIError", 
+    "DataValidationError",
+    # Rate limiting
+    "RateLimiter",
+    # Constants
+    "DEFAULT_API_DELAY",
+    "MIN_API_DELAY", 
+    "MAX_API_DELAY",
     # dlt resources (for advanced users)
     "schedule_resource",
     "teams_resource",

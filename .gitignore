@@ -74,3 +74,9 @@ htmlcov/
 
 # Copilot
 .copilot-instructions.md
+
+# dlt
+.dlt/.secrets.toml
+
+# DWH
+docs/.motherduck-llms.txt

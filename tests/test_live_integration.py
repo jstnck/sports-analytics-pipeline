@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from sports_analytics_pipeline.ingest import (
-    ingest_season_schedule_dlt,
+    ingest_season_schedule,
     schedule_resource,
 )
 
@@ -44,7 +44,7 @@ class TestLiveAPIIntegration:
             end_date = date(2024, 11, 17)  # 3 days
             
             # Should not raise an exception
-            ingest_season_schedule_dlt(
+            ingest_season_schedule(
                 season_end_year=2025,
                 db_path=str(db_path),
                 start=start_date,
