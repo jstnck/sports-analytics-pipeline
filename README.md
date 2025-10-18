@@ -1,45 +1,46 @@
-Sports Analytics Pipeline
+# Sports Analytics Pipeline
 
-This application ingests data about NBA games from ESPN. It is the first step of a large data analytics pipeline.
+NBA data ingestion pipeline that collects game data from ESPN's public API and stores it in DuckDB for analysis.
 
-This is the data ingestion section - using python to consume from the ESPN public API, or web-scrape data on games, schedules, players, teams, etc. 
+## Features
 
-NBA data will then be minimally transformed and saved in the staging layer of a DuckDB database
+- Ingest season schedules, team info, and game statistics
+- Store data in DuckDB with minimal transformations
+- CLI interface for running ingestion tasks
+- Table-specific ingestion (schedule, teams, venues, box scores, player stats)
+
+## Quick Start
+
+```bash
+# Initialize database
+python main.py --init-db
+
+# Ingest current season schedule
+python main.py --season-schedule 2025
+
+# Ingest data for specific date
+python main.py --date 2024-12-25
+
+# Run demo (last 3 days)
+python main.py --demo
+```
 
 ## Development
 
-This project uses `uv` to manage dependencies and a lightweight dev toolchain:
-
-- ruff: linter and formatter (fast, replaces flake8 + isort + some auto-fixes)
-- mypy: static type checker
-
-Install dev tools into the virtual environment:
-
 ```bash
-cd sports-analytics-pipeline
-uv add --dev mypy pandas-stubs types-requests ruff
-source .venv/bin/activate
-```
+# Install dependencies
+uv sync
 
-Run the checks and formatter:
+# Run tests
+python -m pytest
 
-```bash
-# Format / auto-fix issues
-ruff format .
-# Lint (shows warnings/errors)
-ruff check .
+# Format and lint
+ruff format . && ruff check .
+
 # Type check
 python -m mypy sports_analytics_pipeline tests
 ```
 
-Follow the coding conventions in `.copilot-instructions.md` (docstrings, type hints, pytest-style tests).
+## Data
 
-## Data model
-
-A minimal description of the DuckDB data model is available in `docs/data-model.md`.
-
-## Analysis
-Ad-hoc analysis on the scraped data can be done using your tool of choice - here we use the DuckDB ui
-
-## ToDo
-Currently, dlt uses its own cache in its extract normalize load pipelines. Having a more accessible cache of raw data would be useful for faster backfills and reduced API calls.
+Data is stored in `data/games.duckdb` with tables for schedules, teams, venues, box scores, and player statistics.
