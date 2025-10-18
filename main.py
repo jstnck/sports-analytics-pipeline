@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Main entry point for the sports analytics pipeline.
+"""Command-line interface for the sports analytics pipeline.
 
-This provides a command-line interface for the dlt-based ingestion system.
-It includes examples of typical usage patterns and serves as a reference for
-Dagster integration.
+This provides a CLI for the dlt-based ingestion system with individual 
+function calls that can be easily orchestrated by external systems.
+Each operation is atomic and can be called independently.
 """
 
 from __future__ import annotations
@@ -17,8 +17,6 @@ from sports_analytics_pipeline.ingest import (
     ingest_season_schedule_dlt,
     ingest_date_dlt,
     backfill_box_scores_dlt,
-    dagster_ingest_season_schedule,
-    dagster_ingest_daily_data,
 )
 
 # Configure logging
@@ -44,8 +42,8 @@ Examples:
   # Backfill box scores for date range
   python main.py --backfill 2025 --start 2024-10-01 --end 2024-12-31
 
-  # Dagster-style function call (returns metadata dict)
-  python main.py --dagster-schedule 2025
+  # Run a quick demo
+  python main.py --demo
         """,
     )
 
@@ -83,16 +81,6 @@ Examples:
         type=int,
         help="Backfill box scores for season (provide season end year)",
     )
-    group.add_argument(
-        "--dagster-schedule",
-        type=int,
-        help="Run season schedule ingestion with Dagster-style return",
-    )
-    group.add_argument(
-        "--dagster-daily",
-        type=str,
-        help="Run daily ingestion with Dagster-style return (YYYY-MM-DD format)",
-    )
 
     # Date range options for backfill
     parser.add_argument(
@@ -119,12 +107,10 @@ Examples:
             args.season_schedule,
             args.date,
             args.backfill,
-            args.dagster_schedule,
-            args.dagster_daily,
         ]
     ):
         parser.error(
-            "one of the arguments --season-schedule --date --backfill --dagster-schedule --dagster-daily is required (or use --demo)"
+            "one of the arguments --season-schedule --date --backfill is required (or use --demo)"
         )
 
     try:
@@ -157,19 +143,6 @@ Examples:
                 args.backfill, db_path, start=start_date, end=end_date
             )
             logger.info("Box score backfill completed successfully")
-
-        elif args.dagster_schedule:
-            logger.info(
-                f"Running Dagster-style schedule ingestion for season ending {args.dagster_schedule}"
-            )
-            result = dagster_ingest_season_schedule(args.dagster_schedule, db_path)
-            print(f"Dagster result: {result}")
-
-        elif args.dagster_daily:
-            target_date = date.fromisoformat(args.dagster_daily)
-            logger.info(f"Running Dagster-style daily ingestion for date {target_date}")
-            result = dagster_ingest_daily_data(target_date, db_path)
-            print(f"Dagster result: {result}")
 
     except Exception as e:
         logger.error(f"Pipeline execution failed: {e}")

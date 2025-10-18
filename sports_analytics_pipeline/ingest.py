@@ -4,7 +4,7 @@ This module provides a complete dlt-based data ingestion pipeline for NBA analyt
 It handles scoreboard, summary, and player data ingestion with built-in transformations
 to match the expected schema.
 
-Designed for Dagster orchestration with clean function interfaces.
+Designed with clean function interfaces for orchestration flexibility.
 """
 
 from __future__ import annotations
@@ -20,11 +20,21 @@ import dlt
 from dlt.sources.rest_api import rest_api_source
 
 
-# ESPN API endpoints
-SCOREBOARD_URL = (
-    "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
-)
-SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
+# User-Agent for API requests
+USER_AGENT = "sports-analytics-pipeline-dlt/0.1 (+https://github.com/jstnck)"
+
+# ESPN API configuration
+BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
+SCOREBOARD_URL = f"{BASE_URL}/scoreboard"
+SUMMARY_URL = f"{BASE_URL}/summary"
+
+# NBA season configuration
+NBA_SEASON_START_MONTH = 10  # October
+NBA_SEASON_START_DAY = 1
+NBA_SEASON_END_MONTH = 6  # June
+NBA_SEASON_END_DAY = 30
+
+# TODO: Handling covid bubble season dates
 
 logger = logging.getLogger(__name__)
 
@@ -130,16 +140,14 @@ def _extract_teams_from_schedule(
             teams.add(record["away_team"])
 
     for team_name in teams:
-        yield {
-            "name": team_name,
-            "city": None,  # Could be enhanced to parse city from team name
-        }
+        yield {"name": team_name}
 
 
 def _extract_venues_from_schedule(
     schedule_records: List[Dict[str, Any]],
 ) -> Iterator[Dict[str, Any]]:
-    """Extract unique venues from schedule records."""
+    """Extract unique venues from schedule records.
+    TODO: Create a seed file with matching teams, cities, venues"""
     venues = set()
     for record in schedule_records:
         if record.get("venue"):
@@ -240,57 +248,60 @@ def _transform_player_stats(
     }
 
 
+# dlt resources using REST API source with built-in caching
+
+
 @dlt.resource(
     name="schedule",
     write_disposition="merge",
     primary_key=["date", "away_team", "home_team"],
 )
 def schedule_resource(start_date: date, end_date: date) -> Iterator[Dict[str, Any]]:
-    """dlt resource for NBA schedule data with transformation to schema format."""
+    """Transformed schedule data from ESPN scoreboard API using dlt's built-in caching."""
     from typing import cast
     from dlt.sources.rest_api import RESTAPIConfig
 
-    # Configure REST API source for scoreboard data
-    resources: List[Dict[str, Any]] = []
+    for dt in _date_range(start_date, end_date):
+        date_str = dt.strftime("%Y%m%d")
 
-    # Create resources for each date
-    for i, dt in enumerate(_date_range(start_date, end_date)):
-        resources.append(
+        # Use dlt's REST API source with built-in caching
+        source_config = cast(
+            RESTAPIConfig,
             {
-                "name": f"scoreboard_{i:03d}",
-                "endpoint": {
-                    "path": "scoreboard",
-                    "params": {"dates": dt.strftime("%Y%m%d")},
-                    "paginator": None,
-                    "data_selector": "$",
+                "client": {
+                    "base_url": BASE_URL,
+                    "headers": {"User-Agent": USER_AGENT},
                 },
-            }
+                "resources": [
+                    {
+                        "name": "scoreboard_data",
+                        "endpoint": {
+                            "path": "scoreboard",
+                            "params": {"dates": date_str},
+                            "paginator": None,
+                            "data_selector": "$",
+                        },
+                    }
+                ],
+            },
         )
 
-    source_config = cast(RESTAPIConfig, {
-        "client": {
-            "base_url": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba",
-            "headers": {
-                "User-Agent": "sports-analytics-pipeline-dlt/0.1 (+https://example.com)"
-            },
-        },
-        "resources": resources,
-    })
+        api_source = rest_api_source(source_config)
 
-    # Get the REST API source
-    api_source = rest_api_source(source_config)
+        # Get data from dlt source (with automatic caching)
+        for resource in api_source.resources.values():
+            for response_data in resource:
+                events = response_data.get("events", [])
 
-    # Process each resource and transform events
-    for resource in api_source.resources.values():
-        for scoreboard_data in resource:
-            events = scoreboard_data.get("events") or []
-            for event in events:
-                yield _transform_scoreboard_event(event)
+                for event in events:
+                    yield _transform_scoreboard_event(event)
 
 
 @dlt.resource(name="teams", write_disposition="merge", primary_key="name")
 def teams_resource(start_date: date, end_date: date) -> Iterator[Dict[str, Any]]:
-    """dlt resource for teams data extracted from schedule."""
+    """dlt resource for teams data extracted from schedule.
+    TODO: Could create a seed file here, but would need international teams for preseason.
+    """
 
     # Collect all schedule records first to extract teams
     schedule_records = list(schedule_resource(start_date, end_date))
@@ -347,15 +358,16 @@ def player_box_score_resource(target_date: date) -> Iterator[Dict[str, Any]]:
     if not resources:
         return
 
-    source_config = cast(RESTAPIConfig, {
-        "client": {
-            "base_url": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba",
-            "headers": {
-                "User-Agent": "sports-analytics-pipeline-dlt/0.1 (+https://example.com)"
+    source_config = cast(
+        RESTAPIConfig,
+        {
+            "client": {
+                "base_url": BASE_URL,
+                "headers": {"User-Agent": USER_AGENT},
             },
+            "resources": resources,
         },
-        "resources": resources,
-    })
+    )
 
     # Get the REST API source
     api_source = rest_api_source(source_config)
@@ -427,15 +439,16 @@ def box_score_resource(target_date: date) -> Iterator[Dict[str, Any]]:
     if not resources:
         return
 
-    source_config = cast(RESTAPIConfig, {
-        "client": {
-            "base_url": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba",
-            "headers": {
-                "User-Agent": "sports-analytics-pipeline-dlt/0.1 (+https://example.com)"
+    source_config = cast(
+        RESTAPIConfig,
+        {
+            "client": {
+                "base_url": BASE_URL,
+                "headers": {"User-Agent": USER_AGENT},
             },
+            "resources": resources,
         },
-        "resources": resources,
-    })
+    )
 
     # Get the REST API source
     api_source = rest_api_source(source_config)
@@ -533,7 +546,6 @@ def ingest_season_schedule_dlt(
 ) -> None:
     """Ingest NBA season schedule data using dlt.
 
-    This replaces the functionality of pipeline.ingest_season_schedule().
     Creates schedule, teams, and venues tables with proper schema.
 
     Args:
@@ -556,18 +568,18 @@ def ingest_season_schedule_dlt(
         dataset_name="main",  # Use main schema to match existing tables
     )
 
-    # Run the pipeline with schedule, teams, and venues resources
+    # Run the pipeline with schedule and related data
     info = pipeline.run(
         [
-            schedule_resource(start, end),
-            teams_resource(start, end),
-            venues_resource(start, end),
+            schedule_resource(start, end),  # Schedule with built-in dlt caching
+            teams_resource(start, end),  # Extracted teams
+            venues_resource(start, end),  # Extracted venues
         ]
     )
 
     # Log results
     logger.info(f"Schedule pipeline completed. Loaded {len(info.loads_ids)} loads.")
-    if hasattr(info, 'has_failed_jobs') and info.has_failed_jobs:
+    if hasattr(info, "has_failed_jobs") and info.has_failed_jobs:
         logger.error("Pipeline had failed jobs - check dlt logs for details")
 
 
@@ -575,17 +587,16 @@ def ingest_date_dlt(
     target_date: date,
     db_path: str | Path,
     *,
-    delay: float = 0.1,  # Kept for API compatibility but dlt handles rate limiting
+    delay: float = 0.1,
 ) -> None:
     """Ingest NBA data for a specific date using dlt.
 
-    This replaces the functionality of pipeline.ingest_date().
     Creates player_box_score and box_score tables for the given date.
 
     Args:
         target_date: Date to fetch data for
         db_path: Path to DuckDB database file
-        delay: Delay parameter (maintained for compatibility, dlt handles rate limiting)
+        delay: Request delay in seconds (dlt handles rate limiting automatically)
     """
     logger.info(f"Ingesting data for date {target_date}")
 
@@ -596,17 +607,17 @@ def ingest_date_dlt(
         dataset_name="main",  # Use main schema to match existing tables
     )
 
-    # Run the pipeline with player and team box score resources
-    info = pipeline.run(
-        [
-            player_box_score_resource(target_date),
-            box_score_resource(target_date),
-        ]
-    )
+    # Run the pipeline with box score data (dlt handles API caching automatically)
+    resources_to_run = [
+        player_box_score_resource(target_date),
+        box_score_resource(target_date),
+    ]
+
+    info = pipeline.run(resources_to_run)
 
     # Log results
     logger.info(f"Daily pipeline completed. Loaded {len(info.loads_ids)} loads.")
-    if hasattr(info, 'has_failed_jobs') and info.has_failed_jobs:
+    if hasattr(info, "has_failed_jobs") and info.has_failed_jobs:
         logger.error("Pipeline had failed jobs - check dlt logs for details")
 
 
@@ -621,7 +632,6 @@ def backfill_box_scores_dlt(
 ) -> None:
     """Backfill team-level box scores using dlt.
 
-    This replaces the functionality of pipeline.backfill_box_scores_monthly().
     Processes dates individually but with efficient dlt batching and error handling.
 
     Args:
@@ -629,7 +639,7 @@ def backfill_box_scores_dlt(
         db_path: Path to DuckDB database file
         start: Optional start date (defaults to Oct 1 of season start year)
         end: Optional end date (defaults to Jun 30 of season end year)
-        delay: Delay parameter (maintained for compatibility)
+        delay: Request delay in seconds
         skip_existing: If True, skip dates already present in box_score table
     """
     if start is None:
@@ -687,122 +697,11 @@ def backfill_box_scores_dlt(
     )
 
 
-# Dagster-compatible interface functions
-def dagster_ingest_season_schedule(
-    season_end_year: int, db_path: str | Path
-) -> Dict[str, Any]:
-    """Dagster asset function for season schedule ingestion.
-
-    Returns:
-        Dict with ingestion metadata for Dagster tracking
-    """
-    start_time = datetime.now(timezone.utc)
-
-    try:
-        ingest_season_schedule_dlt(season_end_year, db_path)
-
-        return {
-            "status": "success",
-            "season_end_year": season_end_year,
-            "duration_seconds": (
-                datetime.now(timezone.utc) - start_time
-            ).total_seconds(),
-            "message": f"Successfully ingested schedule for season ending {season_end_year}",
-        }
-    except Exception as e:
-        logger.exception(f"Failed to ingest season schedule: {e}")
-        return {
-            "status": "failed",
-            "season_end_year": season_end_year,
-            "duration_seconds": (
-                datetime.now(timezone.utc) - start_time
-            ).total_seconds(),
-            "error": str(e),
-        }
-
-
-def dagster_ingest_daily_data(target_date: date, db_path: str | Path) -> Dict[str, Any]:
-    """Dagster asset function for daily data ingestion.
-
-    Returns:
-        Dict with ingestion metadata for Dagster tracking
-    """
-    start_time = datetime.now(timezone.utc)
-
-    try:
-        ingest_date_dlt(target_date, db_path)
-
-        return {
-            "status": "success",
-            "target_date": target_date.isoformat(),
-            "duration_seconds": (
-                datetime.now(timezone.utc) - start_time
-            ).total_seconds(),
-            "message": f"Successfully ingested data for {target_date}",
-        }
-    except Exception as e:
-        logger.exception(f"Failed to ingest daily data: {e}")
-        return {
-            "status": "failed",
-            "target_date": target_date.isoformat(),
-            "duration_seconds": (
-                datetime.now(timezone.utc) - start_time
-            ).total_seconds(),
-            "error": str(e),
-        }
-
-
-def dagster_backfill_box_scores(
-    season_end_year: int,
-    db_path: str | Path,
-    start_date: Optional[date] = None,
-    end_date: Optional[date] = None,
-) -> Dict[str, Any]:
-    """Dagster asset function for box score backfill.
-
-    Returns:
-        Dict with backfill metadata for Dagster tracking
-    """
-    start_time = datetime.now(timezone.utc)
-
-    try:
-        backfill_box_scores_dlt(
-            season_end_year, db_path, start=start_date, end=end_date, skip_existing=True
-        )
-
-        return {
-            "status": "success",
-            "season_end_year": season_end_year,
-            "start_date": start_date.isoformat() if start_date else None,
-            "end_date": end_date.isoformat() if end_date else None,
-            "duration_seconds": (
-                datetime.now(timezone.utc) - start_time
-            ).total_seconds(),
-            "message": f"Successfully backfilled box scores for season ending {season_end_year}",
-        }
-    except Exception as e:
-        logger.exception(f"Failed to backfill box scores: {e}")
-        return {
-            "status": "failed",
-            "season_end_year": season_end_year,
-            "start_date": start_date.isoformat() if start_date else None,
-            "end_date": end_date.isoformat() if end_date else None,
-            "duration_seconds": (
-                datetime.now(timezone.utc) - start_time
-            ).total_seconds(),
-            "error": str(e),
-        }
-
-
 __all__ = [
     # Core dlt pipeline functions
     "ingest_season_schedule_dlt",
     "ingest_date_dlt",
     "backfill_box_scores_dlt",
-    # Dagster-compatible interface
-    "dagster_ingest_season_schedule",
-    "dagster_ingest_daily_data",
-    "dagster_backfill_box_scores",
     # dlt resources (for advanced users)
     "schedule_resource",
     "teams_resource",

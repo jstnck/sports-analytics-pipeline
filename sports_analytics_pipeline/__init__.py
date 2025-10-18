@@ -6,15 +6,11 @@ NBA data ingestion and analytics pipeline.
 from .ingest import (
     ingest_season_schedule_dlt,
     ingest_date_dlt,
-    dagster_ingest_season_schedule,
-    dagster_ingest_daily_data,
-    dagster_backfill_box_scores,
+    backfill_box_scores_dlt,
 )
 
 __all__ = [
     "ingest_season_schedule_dlt",
-    "ingest_date_dlt", 
-    "dagster_ingest_season_schedule",
-    "dagster_ingest_daily_data",
-    "dagster_backfill_box_scores",
+    "ingest_date_dlt",
+    "backfill_box_scores_dlt",
 ]

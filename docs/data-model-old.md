@@ -1,3 +1,5 @@
+This data model refers to the previous archecture. TODO: update data model
+
 # Data model (minimal)
 
 This file lists the DuckDB tables and their columns used by the project. It's intentionally minimal — see `schema.py` for the authoritative SQL schema definition. Tables are created automatically by dlt during data ingestion.
