@@ -38,6 +38,10 @@ venv.bak/
 .vscode/
 .idea/
 
+# Jupyter Notebooks
+*.ipynb
+.ipynb_checkpoints/
+
 # macOS
 .DS_Store
 

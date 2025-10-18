@@ -41,5 +41,6 @@ dev = [
     "ruff>=0.14.0",
     "types-requests>=2.32.4.20250913",
     "pytest>=8.4.2",
+    "jupyterlab>=4.4.9",
 ]
 

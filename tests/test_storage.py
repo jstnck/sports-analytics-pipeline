@@ -150,8 +150,8 @@ def test_dlt_vs_schema_compatibility() -> None:
         
         # Insert test rows with required dlt metadata columns
         conn.execute("""
-            INSERT INTO teams (name, city, _dlt_load_id, _dlt_id) 
-            VALUES ('Test Team', 'Test City', 'test_load_123', 'test_id_123')
+            INSERT INTO teams (name, _dlt_load_id, _dlt_id) 
+            VALUES ('Test Team', 'test_load_123', 'test_id_123')
         """)
         
         conn.execute("""

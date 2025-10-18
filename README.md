@@ -41,3 +41,5 @@ A minimal description of the DuckDB data model is available in `docs/data-model.
 ## Analysis
 Ad-hoc analysis on the scraped data can be done using your tool of choice - here we use the DuckDB ui
 
+## ToDo
+Currently, dlt uses its own cache in its extract normalize load pipelines. Having a more accessible cache of raw data would be useful for faster backfills and reduced API calls.

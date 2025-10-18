@@ -1,0 +1,89 @@
+"""Tests for CLI functionality in main.py.
+
+Tests the new database initialization and table-specific ingestion features.
+"""
+
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import pytest
+
+# Import main functions to test
+import main
+
+
+class TestCLIArgumentParsing:
+    """Test CLI argument parsing and validation."""
+
+    def test_init_db_argument(self) -> None:
+        """Test --init-db argument parsing."""
+        with patch('main.init_db') as mock_init:
+            with patch('sys.argv', ['main.py', '--init-db']):
+                main.main()
+                mock_init.assert_called_once_with('data/games.duckdb')
+
+    def test_tables_argument_validation_valid(self) -> None:
+        """Test valid table names are accepted."""
+        valid_tables = ['box_score', 'player_box_score']
+        
+        with patch('main.ingest_date_dlt') as mock_ingest:
+            with patch('sys.argv', ['main.py', '--date', '2024-10-23', '--tables', ','.join(valid_tables)]):
+                main.main()
+                # Check that the function was called with the correct table set
+                args, kwargs = mock_ingest.call_args
+                assert isinstance(args[2], set)  # tables argument should be a set
+                assert args[2] == set(valid_tables)
+
+    def test_tables_argument_validation_invalid(self) -> None:
+        """Test invalid table names are rejected."""
+        with pytest.raises(SystemExit):  # argparse calls sys.exit on error
+            with patch('sys.argv', ['main.py', '--date', '2024-10-23', '--tables', 'invalid_table']):
+                main.main()
+
+
+class TestCLITableSelection:
+    """Test table selection functionality across different operations."""
+
+    def test_date_ingestion_with_table_selection(self) -> None:
+        """Test date ingestion with specific tables."""
+        with patch('main.ingest_date_dlt') as mock_ingest:
+            with patch('sys.argv', ['main.py', '--date', '2024-10-23', '--tables', 'box_score,player_box_score']):
+                main.main()
+                
+                args, kwargs = mock_ingest.call_args
+                target_date, db_path, tables = args
+                
+                assert str(target_date) == '2024-10-23'
+                assert tables == {'box_score', 'player_box_score'}
+
+    def test_backfill_with_table_selection(self) -> None:
+        """Test backfill with specific tables."""
+        with patch('main.backfill_box_scores_dlt') as mock_backfill:
+            with patch('sys.argv', ['main.py', '--backfill', '2025', '--start', '2024-10-01', 
+                                  '--end', '2024-10-31', '--tables', 'box_score']):
+                main.main()
+                
+                # Check that backfill_box_scores_dlt was called with correct arguments
+                mock_backfill.assert_called_once()
+                args, kwargs = mock_backfill.call_args
+                
+                assert args[0] == 2025  # season_end_year
+                assert kwargs['tables'] == {'box_score'}
+
+
+class TestCLIErrorHandling:
+    """Test CLI error handling scenarios."""
+
+    def test_invalid_date_format(self) -> None:
+        """Test handling of invalid date format."""
+        with pytest.raises(ValueError):
+            with patch('sys.argv', ['main.py', '--date', 'invalid-date']):
+                main.main()
+
+    def test_no_operation_specified(self) -> None:
+        """Test error when no operation is specified."""
+        with pytest.raises(SystemExit):
+            with patch('sys.argv', ['main.py']):
+                main.main()

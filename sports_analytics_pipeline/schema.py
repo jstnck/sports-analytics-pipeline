@@ -22,16 +22,18 @@ import duckdb
 
 
 def _staging_schema_sql() -> str:
-    """Return SQL for minimal staging tables that match dlt's auto-generated schema.
+    """Return SQL for minimal staging tables that match what dlt will actually create.
     
-    These tables store raw/lightly processed data from ESPN API with minimal constraints.
-    The downstream dbt layer will enforce stronger typing and business rules.
+    Schema designed around:
+    - Our actual resource yield statements
+    - max_table_nesting=3 automatic unpacking by dlt
+    - Native JSON types for complex nested data
+    - Minimal but predictable structure for downstream consumption
     """
     return """
-        -- Core entity tables (minimal, flexible)
+        -- Core entity tables (stable structure)
         CREATE TABLE IF NOT EXISTS teams (
             name VARCHAR NOT NULL,
-            city VARCHAR,  -- Often NULL, filled by downstream processing
             -- dlt metadata columns
             _dlt_load_id VARCHAR NOT NULL,
             _dlt_id VARCHAR NOT NULL
@@ -39,81 +41,78 @@ def _staging_schema_sql() -> str:
 
         CREATE TABLE IF NOT EXISTS venues (
             name VARCHAR NOT NULL,
-            city VARCHAR,  -- Often NULL in API responses
-            state VARCHAR, -- Often NULL in API responses
+            city VARCHAR,      -- Often NULL in API responses
+            state VARCHAR,     -- Often NULL in API responses
             -- dlt metadata columns  
             _dlt_load_id VARCHAR NOT NULL,
             _dlt_id VARCHAR NOT NULL
         );
 
-        -- Schedule table: core game information (mostly raw from ESPN API)
+        -- Schedule table: core game information
         CREATE TABLE IF NOT EXISTS schedule (
-            espn_event_id VARCHAR,  -- ESPN's unique game identifier
-            date VARCHAR NOT NULL,  -- Date as string (YYYY-MM-DD format)
-            start_time VARCHAR,     -- Time as string, may be "00:00:00" 
-            timestamp_utc TIMESTAMP WITH TIME ZONE,  -- Parsed timestamp when available
+            espn_event_id VARCHAR,
+            date VARCHAR NOT NULL,
+            start_time VARCHAR,
+            timestamp_utc TIMESTAMP WITH TIME ZONE,
             away_team VARCHAR NOT NULL,
             home_team VARCHAR NOT NULL,
-            venue VARCHAR,          -- Venue name, may be NULL
-            status VARCHAR,         -- Game status from ESPN (e.g., "STATUS_FINAL")
-            home_score BIGINT,      -- Score as integer, NULL for future games
-            away_score BIGINT,      -- Score as integer, NULL for future games 
-            game_type VARCHAR,      -- "regular season", "playoffs", etc.
-            created_at TIMESTAMP WITH TIME ZONE,  -- When this record was ingested
+            venue VARCHAR,
+            status VARCHAR,
+            home_score BIGINT,
+            away_score BIGINT,
+            game_type VARCHAR,
+            created_at TIMESTAMP WITH TIME ZONE,
             -- dlt metadata columns
             _dlt_load_id VARCHAR NOT NULL,
             _dlt_id VARCHAR NOT NULL
         );
 
-        -- Game-level box score (aggregated team stats per game)
+        -- Box score table: game-level data with JSON unpacking
+        -- Based on: yield {"espn_event_id", "date", "away_team", "home_team", "boxscore", "header", "rosters"}
+        -- With max_table_nesting=3, dlt will create columns like:
+        -- boxscore__teams__0__team__displayName, boxscore__teams__0__statistics__points, etc.
         CREATE TABLE IF NOT EXISTS box_score (
-            espn_event_id VARCHAR,
+            espn_event_id VARCHAR NOT NULL,
             date VARCHAR NOT NULL,
             away_team VARCHAR NOT NULL,
             home_team VARCHAR NOT NULL,
-            -- Team-level aggregated stats (often NULL if not available)
-            home_points BIGINT,
-            away_points BIGINT,
-            home_rebounds BIGINT,
-            away_rebounds BIGINT,
-            home_assists BIGINT,
-            away_assists BIGINT,
-            -- Raw JSON for full boxscore data preservation
-            stats_json VARCHAR,     -- Complete ESPN boxscore response as JSON
+            -- Auto-generated columns from max_table_nesting=3 (examples):
+            -- boxscore__teams (JSON array that couldn't be unpacked further)
+            -- header__competitions__0__competitors (partially unpacked game info)
+            -- rosters (JSON for player roster data)
+            boxscore JSON,     -- Deep nested data that exceeds max_table_nesting
+            header JSON,       -- Game header info that exceeds max_table_nesting  
+            rosters JSON,      -- Player roster data
             -- dlt metadata columns
             _dlt_load_id VARCHAR NOT NULL,
             _dlt_id VARCHAR NOT NULL
         );
 
-        -- Player-level box score (individual player stats per game)
+        -- Player box score table: individual player data
+        -- Based on: yield {"espn_event_id", "player_id", "date", "away_team", "home_team", "player_data"}
+        -- With max_table_nesting=3, dlt will create columns like:
+        -- player_data__athlete__displayName, player_data__team__displayName, etc.
         CREATE TABLE IF NOT EXISTS player_box_score (
-            espn_event_id VARCHAR,
+            espn_event_id VARCHAR NOT NULL,
+            player_id VARCHAR NOT NULL,
             date VARCHAR NOT NULL,
             away_team VARCHAR NOT NULL,
             home_team VARCHAR NOT NULL,
-            first_name VARCHAR NOT NULL,
-            last_name VARCHAR NOT NULL,
-            team VARCHAR,           -- Which team the player played for
-            -- Basic stats (as available from ESPN API)
-            minutes_played VARCHAR, -- Format: "35:45" or similar
-            points BIGINT,
-            rebounds BIGINT,
-            assists BIGINT,
-            fouls BIGINT,
-            plus_minus BIGINT,
-            -- Raw JSON for complete player data preservation
-            stats_json VARCHAR,     -- Complete ESPN player stats as JSON
+            -- Auto-generated columns from max_table_nesting=3 (examples):
+            -- player_data__athlete__displayName, player_data__athlete__firstName
+            -- player_data__team__displayName
+            player_data JSON,  -- Deep nested stats arrays that exceed max_table_nesting
             -- dlt metadata columns
             _dlt_load_id VARCHAR NOT NULL,
             _dlt_id VARCHAR NOT NULL
         );
 
-        -- Players table (roster information, when available)
+        -- Players table (roster information)
         CREATE TABLE IF NOT EXISTS players (
             first_name VARCHAR NOT NULL,
             last_name VARCHAR NOT NULL,
-            date_of_birth DATE,     -- When available from API
-            season VARCHAR,         -- Season identifier (e.g., "2024-25")
+            date_of_birth DATE,
+            season VARCHAR,
             country_of_birth VARCHAR,
             -- dlt metadata columns
             _dlt_load_id VARCHAR NOT NULL,

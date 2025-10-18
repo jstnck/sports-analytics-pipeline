@@ -217,39 +217,4 @@ class TestResourceConfiguration:
         assert dates[1] == date(2024, 10, 16)
         assert dates[2] == date(2024, 10, 17)
 
-    def test_nba_season_constants(self) -> None:
-        """Test that NBA season constants are defined correctly."""
-        from sports_analytics_pipeline.ingest import (
-            NBA_SEASON_START_MONTH,
-            NBA_SEASON_START_DAY,
-            NBA_SEASON_END_MONTH,
-            NBA_SEASON_END_DAY,
-        )
 
-        # NBA season should start in October
-        assert NBA_SEASON_START_MONTH == 10
-        assert NBA_SEASON_START_DAY == 1
-
-        # NBA season should end in June
-        assert NBA_SEASON_END_MONTH == 6
-        assert NBA_SEASON_END_DAY == 30
-
-    def test_api_configuration_constants(self) -> None:
-        """Test that API configuration constants are defined correctly."""
-        from sports_analytics_pipeline.ingest import (
-            USER_AGENT,
-            BASE_URL,
-            SCOREBOARD_URL,
-            SUMMARY_URL,
-        )
-
-        # User agent should be defined
-        assert USER_AGENT is not None
-        assert "sports-analytics-pipeline" in USER_AGENT
-
-        # URLs should be ESPN API endpoints
-        assert (
-            BASE_URL == "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
-        )
-        assert SCOREBOARD_URL == f"{BASE_URL}/scoreboard"
-        assert SUMMARY_URL == f"{BASE_URL}/summary"

@@ -161,93 +161,6 @@ def _extract_venues_from_schedule(
         }
 
 
-def _transform_player_stats(
-    player_data: Dict[str, Any],
-    event_id: str,
-    game_date: str,
-    away_team: str,
-    home_team: str,
-) -> Dict[str, Any]:
-    """Transform player statistics to player_box_score table format."""
-    # Extract athlete info
-    athlete = player_data.get("athlete") or player_data.get("player") or {}
-    first_name = athlete.get("firstName") or athlete.get("displayName") or ""
-    last_name = athlete.get("lastName") or ""
-
-    # Handle full name split if needed
-    if not last_name and first_name and " " in first_name:
-        parts = first_name.split(" ")
-        first_name = parts[0]
-        last_name = " ".join(parts[1:])
-
-    # Get player's team
-    team = player_data.get("team") or athlete.get("team")
-    if isinstance(team, dict):
-        team = team.get("displayName") or team.get("name")
-
-    # Extract stats
-    stats = player_data.get("stats") or player_data.get("statistics") or []
-
-    minutes_played = None
-    points = None
-    rebounds = None
-    assists = None
-    fouls = None
-    plus_minus = None
-
-    if isinstance(stats, list):
-        for stat in stats:
-            if not isinstance(stat, dict):
-                continue
-            stat_name = (stat.get("name") or "").lower()
-            stat_value = stat.get("value")
-
-            if "min" in stat_name and minutes_played is None:
-                minutes_played = str(stat_value) if stat_value is not None else None
-            elif "pts" in stat_name or "points" in stat_name:
-                try:
-                    points = int(stat_value) if stat_value is not None else None
-                except Exception:
-                    points = None
-            elif "reb" in stat_name or "rebounds" in stat_name:
-                try:
-                    rebounds = int(stat_value) if stat_value is not None else None
-                except Exception:
-                    rebounds = None
-            elif "ast" in stat_name or "assists" in stat_name:
-                try:
-                    assists = int(stat_value) if stat_value is not None else None
-                except Exception:
-                    assists = None
-            elif "fouls" in stat_name or "pf" in stat_name:
-                try:
-                    fouls = int(stat_value) if stat_value is not None else None
-                except Exception:
-                    fouls = None
-            elif "plus" in stat_name or "+/-" in stat_name:
-                try:
-                    plus_minus = int(stat_value) if stat_value is not None else None
-                except Exception:
-                    plus_minus = None
-
-    return {
-        "espn_event_id": event_id,
-        "date": game_date,
-        "away_team": away_team,
-        "home_team": home_team,
-        "first_name": first_name,
-        "last_name": last_name,
-        "team": team,
-        "minutes_played": minutes_played,
-        "points": points,
-        "rebounds": rebounds,
-        "assists": assists,
-        "stats_json": json.dumps(player_data),
-        "fouls": fouls,
-        "plus_minus": plus_minus,
-    }
-
-
 # dlt resources using REST API source with built-in caching
 
 
@@ -324,7 +237,8 @@ def venues_resource(start_date: date, end_date: date) -> Iterator[Dict[str, Any]
 @dlt.resource(
     name="player_box_score",
     write_disposition="merge",
-    primary_key=["date", "away_team", "home_team", "first_name", "last_name"],
+    primary_key=["espn_event_id", "player_id"],  # Simplified primary key
+    max_table_nesting=3,  # Minimal schema rule: max nesting level is 3
 )
 def player_box_score_resource(target_date: date) -> Iterator[Dict[str, Any]]:
     """dlt resource for player box score data."""
@@ -384,28 +298,30 @@ def player_box_score_resource(target_date: date) -> Iterator[Dict[str, Any]]:
         home_team = game_info["home_team"]
 
         for summary_data in resource:
-            # Extract players from boxscore
+            # Minimal extraction - just add metadata and let dlt/dbt handle player stats
             boxscore = summary_data.get("boxscore") or {}
             players = boxscore.get("players") or []
 
-            for player_data in players:
+            for i, player_data in enumerate(players):
                 if not isinstance(player_data, dict):
                     continue
 
-                # Transform and yield player data
-                player_record = _transform_player_stats(
-                    player_data, event_id, game_date, away_team, home_team
-                )
-
-                # Only yield if we have valid player names
-                if player_record.get("first_name") and player_record.get("last_name"):
-                    yield player_record
+                # Create minimal player record with raw data
+                yield {
+                    "espn_event_id": event_id,
+                    "player_id": f"{event_id}_{i:03d}",  # Simple unique ID
+                    "date": game_date,
+                    "away_team": away_team,
+                    "home_team": home_team,
+                    "player_data": player_data,  # Raw player data for dlt to unpack
+                }
 
 
 @dlt.resource(
     name="box_score",
     write_disposition="merge",
-    primary_key=["date", "away_team", "home_team"],
+    primary_key=["espn_event_id"],
+    max_table_nesting=3,  # Minimal schema rule: max nesting level is 3
 )
 def box_score_resource(target_date: date) -> Iterator[Dict[str, Any]]:
     """dlt resource for game-level box score data (aggregated by game, not team)."""
@@ -465,81 +381,22 @@ def box_score_resource(target_date: date) -> Iterator[Dict[str, Any]]:
         home_team = game_info["home_team"]
 
         for summary_data in resource:
-            # Extract teams from boxscore and aggregate into game-level record
-            boxscore = summary_data.get("boxscore") or {}
-            teams = boxscore.get("teams") or boxscore.get("teamStats") or []
-
-            # Initialize stats for home and away teams
-            home_points = None
-            away_points = None
-            home_rebounds = None
-            away_rebounds = None
-            home_assists = None
-            away_assists = None
-
-            # Process team data to extract home/away stats
-            for team_data in teams:
-                if not isinstance(team_data, dict):
-                    continue
-
-                team_name = (
-                    (team_data.get("team") or {}).get("displayName")
-                    if isinstance(team_data.get("team"), dict)
-                    else team_data.get("team")
-                )
-                stats = team_data.get("statistics") or team_data.get("stats") or {}
-
-                if isinstance(stats, dict):
-                    points = stats.get("points")
-                    rebounds = stats.get("rebounds")
-                    assists = stats.get("assists")
-
-                    # Assign to home or away based on team name match
-                    if team_name == home_team:
-                        home_points = points
-                        home_rebounds = rebounds
-                        home_assists = assists
-                    elif team_name == away_team:
-                        away_points = points
-                        away_rebounds = rebounds
-                        away_assists = assists
-
-            # If we couldn't match by team name but have 2 teams, assign deterministically
-            if (home_points is None and away_points is None) and len(teams) >= 2:
-                # First team = home, second team = away (fallback)
-                if len(teams) >= 1:
-                    stats = teams[0].get("statistics") or teams[0].get("stats") or {}
-                    if isinstance(stats, dict):
-                        home_points = stats.get("points")
-                        home_rebounds = stats.get("rebounds")
-                        home_assists = stats.get("assists")
-
-                if len(teams) >= 2:
-                    stats = teams[1].get("statistics") or teams[1].get("stats") or {}
-                    if isinstance(stats, dict):
-                        away_points = stats.get("points")
-                        away_rebounds = stats.get("rebounds")
-                        away_assists = stats.get("assists")
-
-            # Create game-level box score record matching the schema
+            # Minimal extraction - just add metadata and let dlt/dbt handle the rest
             yield {
                 "espn_event_id": event_id,
                 "date": game_date,
                 "away_team": away_team,
                 "home_team": home_team,
-                "home_points": home_points,
-                "away_points": away_points,
-                "home_rebounds": home_rebounds,
-                "away_rebounds": away_rebounds,
-                "home_assists": home_assists,
-                "away_assists": away_assists,
-                "stats_json": json.dumps(boxscore),
+                "boxscore": summary_data.get("boxscore"),  # Raw boxscore data for dlt to unpack
+                "header": summary_data.get("header"),      # Game header info
+                "rosters": summary_data.get("rosters"),    # Player rosters
             }
 
 
 def ingest_season_schedule_dlt(
     season_end_year: int,
     db_path: str | Path,
+    tables: Optional[set[str]] = None,
     *,
     start: Optional[date] = None,
     end: Optional[date] = None,
@@ -551,6 +408,7 @@ def ingest_season_schedule_dlt(
     Args:
         season_end_year: NBA season end year (e.g., 2025 for 2024-25 season)
         db_path: Path to DuckDB database file
+        tables: Optional set of tables to ingest. Available: {'schedule', 'teams', 'venues'}
         start: Optional start date (defaults to Oct 1 of season start year)
         end: Optional end date (defaults to Jun 30 of season end year)
     """
@@ -559,7 +417,20 @@ def ingest_season_schedule_dlt(
     if end is None:
         end = date(season_end_year, 6, 30)
 
+    # Default to all schedule-related tables if none specified
+    if tables is None:
+        tables = {'schedule', 'teams', 'venues'}
+    
+    # Filter to only schedule-related tables
+    schedule_tables = {'schedule', 'teams', 'venues'}
+    selected_tables = tables.intersection(schedule_tables)
+    
+    if not selected_tables:
+        logger.warning(f"No valid schedule tables selected from {tables}. Available: {schedule_tables}")
+        return
+
     logger.info(f"Ingesting season schedule from {start} to {end}")
+    logger.info(f"Selected tables: {', '.join(sorted(selected_tables))}")
 
     # Create dlt pipeline with DuckDB destination
     pipeline = dlt.pipeline(
@@ -568,14 +439,17 @@ def ingest_season_schedule_dlt(
         dataset_name="main",  # Use main schema to match existing tables
     )
 
-    # Run the pipeline with schedule and related data
-    info = pipeline.run(
-        [
-            schedule_resource(start, end),  # Schedule with built-in dlt caching
-            teams_resource(start, end),  # Extracted teams
-            venues_resource(start, end),  # Extracted venues
-        ]
-    )
+    # Build resources list based on selected tables
+    resources_to_run = []
+    if 'schedule' in selected_tables:
+        resources_to_run.append(schedule_resource(start, end))
+    if 'teams' in selected_tables:
+        resources_to_run.append(teams_resource(start, end))
+    if 'venues' in selected_tables:
+        resources_to_run.append(venues_resource(start, end))
+
+    # Run the pipeline with selected resources
+    info = pipeline.run(resources_to_run)
 
     # Log results
     logger.info(f"Schedule pipeline completed. Loaded {len(info.loads_ids)} loads.")
@@ -586,6 +460,7 @@ def ingest_season_schedule_dlt(
 def ingest_date_dlt(
     target_date: date,
     db_path: str | Path,
+    tables: Optional[set[str]] = None,
     *,
     delay: float = 0.1,
 ) -> None:
@@ -596,9 +471,23 @@ def ingest_date_dlt(
     Args:
         target_date: Date to fetch data for
         db_path: Path to DuckDB database file
+        tables: Optional set of tables to ingest. Available: {'box_score', 'player_box_score'}
         delay: Request delay in seconds (dlt handles rate limiting automatically)
     """
+    # Default to all daily tables if none specified
+    if tables is None:
+        tables = {'box_score', 'player_box_score'}
+    
+    # Filter to only daily tables
+    daily_tables = {'box_score', 'player_box_score'}
+    selected_tables = tables.intersection(daily_tables)
+    
+    if not selected_tables:
+        logger.warning(f"No valid daily tables selected from {tables}. Available: {daily_tables}")
+        return
+
     logger.info(f"Ingesting data for date {target_date}")
+    logger.info(f"Selected tables: {', '.join(sorted(selected_tables))}")
 
     # Create dlt pipeline with DuckDB destination
     pipeline = dlt.pipeline(
@@ -607,11 +496,12 @@ def ingest_date_dlt(
         dataset_name="main",  # Use main schema to match existing tables
     )
 
-    # Run the pipeline with box score data (dlt handles API caching automatically)
-    resources_to_run = [
-        player_box_score_resource(target_date),
-        box_score_resource(target_date),
-    ]
+    # Build resources list based on selected tables
+    resources_to_run = []
+    if 'player_box_score' in selected_tables:
+        resources_to_run.append(player_box_score_resource(target_date))
+    if 'box_score' in selected_tables:
+        resources_to_run.append(box_score_resource(target_date))
 
     info = pipeline.run(resources_to_run)
 
@@ -627,6 +517,7 @@ def backfill_box_scores_dlt(
     *,
     start: Optional[date] = None,
     end: Optional[date] = None,
+    tables: Optional[set[str]] = None,
     delay: float = 0.1,
     skip_existing: bool = True,
 ) -> None:
@@ -639,6 +530,7 @@ def backfill_box_scores_dlt(
         db_path: Path to DuckDB database file
         start: Optional start date (defaults to Oct 1 of season start year)
         end: Optional end date (defaults to Jun 30 of season end year)
+        tables: Optional set of tables to ingest. Available: {'box_score', 'player_box_score'}
         delay: Request delay in seconds
         skip_existing: If True, skip dates already present in box_score table
     """
@@ -647,7 +539,20 @@ def backfill_box_scores_dlt(
     if end is None:
         end = date(season_end_year, 6, 30)
 
+    # Default to all daily tables if none specified
+    if tables is None:
+        tables = {'box_score', 'player_box_score'}
+    
+    # Filter to only daily tables
+    daily_tables = {'box_score', 'player_box_score'}
+    selected_tables = tables.intersection(daily_tables)
+    
+    if not selected_tables:
+        logger.warning(f"No valid daily tables selected from {tables}. Available: {daily_tables}")
+        return
+
     logger.info(f"Backfilling box scores from {start} to {end}")
+    logger.info(f"Selected tables: {', '.join(sorted(selected_tables))}")
 
     # Check existing dates if skip_existing is True
     existing_dates: set[str] = set()
@@ -684,7 +589,7 @@ def backfill_box_scores_dlt(
             continue
 
         try:
-            ingest_date_dlt(current_date, db_path, delay=delay)
+            ingest_date_dlt(current_date, db_path, selected_tables, delay=delay)
             processed_count += 1
             logger.info(f"Processed {current_date} ({processed_count} completed)")
 
