@@ -16,7 +16,6 @@ from pathlib import Path
 import pytest
 
 from sports_analytics_pipeline.ingest import (
-    ingest_date_dlt,
     ingest_season_schedule_dlt,
     schedule_resource,
 )

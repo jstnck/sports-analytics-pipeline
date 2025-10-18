@@ -1,3 +1,6 @@
+# Python version files
+.python-version
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -34,13 +37,20 @@ venv.bak/
 # Pytest
 .pytest_cache/
 
-# IDEs and editors
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+
+# IDE and editor files
 .vscode/
 .idea/
 
 # Jupyter Notebooks
 *.ipynb
 .ipynb_checkpoints/
+
+# Documentation files
+*.pdf
 
 # macOS
 .DS_Store

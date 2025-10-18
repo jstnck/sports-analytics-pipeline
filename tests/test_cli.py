@@ -5,9 +5,7 @@ Tests the new database initialization and table-specific ingestion features.
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import pytest
 
 # Import main functions to test
