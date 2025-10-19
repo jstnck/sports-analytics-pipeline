@@ -76,8 +76,18 @@ htmlcov/
 # Copilot
 .copilot-instructions.md
 
-# dlt
+# dlt configuration and secrets
 .dlt/secrets.toml
+.dlt-dev/secrets.toml
+.dlt-prod/secrets.toml
+# Catch any other secrets.toml files in DLT directories
+.dlt*/secrets.toml
+# DLT pipeline state (can be regenerated)
+.dlt*/.dlt_pipeline_state
+# DLT symlink directory (environment-specific)
+.dlt
 
 # DWH
 docs/.motherduck-llms.txt
+# MotherDuck token file
+.motherduck-token

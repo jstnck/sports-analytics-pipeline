@@ -23,7 +23,9 @@ class TestDltIngestionFunctions:
     """Test main dlt ingestion functions with mocked data."""
 
     @patch("sports_analytics_pipeline.ingest.rest_api_source")
-    def test_ingest_season_schedule_basic(self, mock_rest_api_source: MagicMock) -> None:
+    def test_ingest_season_schedule_basic(
+        self, mock_rest_api_source: MagicMock
+    ) -> None:
         """Test season schedule ingestion with minimal mock data."""
         # Mock the REST API source and response
         mock_resource = Mock()
@@ -88,9 +90,7 @@ class TestDltIngestionFunctions:
             assert mock_rest_api_source.called
 
     @patch("sports_analytics_pipeline.ingest.rest_api_source")
-    def test_ingest_date_basic(
-        self, mock_rest_api_source: MagicMock
-    ) -> None:
+    def test_ingest_date_basic(self, mock_rest_api_source: MagicMock) -> None:
         """Test daily data ingestion with minimal mock data."""
         # Mock REST API source for both scoreboard and game summary data
         mock_scoreboard_resource = Mock()
@@ -107,11 +107,15 @@ class TestDltIngestionFunctions:
                                         "competitors": [
                                             {
                                                 "homeAway": "home",
-                                                "team": {"displayName": "Los Angeles Lakers"},
+                                                "team": {
+                                                    "displayName": "Los Angeles Lakers"
+                                                },
                                             },
                                             {
-                                                "homeAway": "away", 
-                                                "team": {"displayName": "Boston Celtics"},
+                                                "homeAway": "away",
+                                                "team": {
+                                                    "displayName": "Boston Celtics"
+                                                },
                                             },
                                         ],
                                     }
@@ -179,52 +183,81 @@ class TestDltIngestionFunctions:
             assert mock_rest_api_source.called
 
     def test_backfill_box_scores_date_range(self) -> None:
-        """Test that backfill function handles date ranges correctly."""
+        """Test that backfill function filters dates and creates pipeline correctly."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             db_path = Path(tmp_dir) / "test.duckdb"
 
-            # Test with custom date range
+            # Mock the pipeline to avoid real API calls
             with patch(
-                "sports_analytics_pipeline.ingest.ingest_date"
-            ) as mock_ingest:
-                backfill_box_scores(
-                    season_end_year=2025,
-                    db_path=str(db_path),
-                    start=date(2024, 10, 15),
-                    end=date(2024, 10, 16),  # 2 days
-                )
+                "sports_analytics_pipeline.ingest.dlt.pipeline"
+            ) as mock_pipeline:
+                with patch(
+                    "sports_analytics_pipeline.ingest.scoreboard_resource"
+                ) as mock_scoreboard:
+                    with patch(
+                        "sports_analytics_pipeline.ingest.game_summary_resource"
+                    ) as mock_summary:
+                        # Configure mocks
+                        mock_pipeline_instance = Mock()
+                        mock_pipeline_instance.run.return_value = Mock(
+                            loads_ids=["test"], has_failed_jobs=False
+                        )
+                        mock_pipeline.return_value = mock_pipeline_instance
 
-                # Should call ingest_date for each day
-                assert mock_ingest.call_count == 2
+                        backfill_box_scores(
+                            season_end_year=2025,
+                            db_path=str(db_path),
+                            start=date(2024, 10, 15),
+                            end=date(2024, 10, 16),  # 2 days
+                        )
 
-                # Check the dates passed
-                calls = mock_ingest.call_args_list
-                assert calls[0][0][0] == date(2024, 10, 15)  # First positional arg
-                assert calls[1][0][0] == date(2024, 10, 16)  # First positional arg
+                        # Should create ONE pipeline, not one per date
+                        assert mock_pipeline.call_count == 1
+
+                        # Scoreboard should be called once with date range
+                        assert mock_scoreboard.call_count == 1
+
+                        # Game summary should be called for each date (2 times)
+                        assert mock_summary.call_count == 2
 
     def test_backfill_box_scores_default_dates(self) -> None:
         """Test that backfill function uses correct default date range."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             db_path = Path(tmp_dir) / "test.duckdb"
 
+            # Mock pipeline to avoid real API calls and check date range
             with patch(
-                "sports_analytics_pipeline.ingest.ingest_date"
-            ) as mock_ingest:
-                backfill_box_scores(
-                    season_end_year=2025,
-                    db_path=str(db_path),
-                )
+                "sports_analytics_pipeline.ingest.dlt.pipeline"
+            ) as mock_pipeline:
+                with patch(
+                    "sports_analytics_pipeline.ingest.scoreboard_resource"
+                ) as mock_scoreboard:
+                    with patch(
+                        "sports_analytics_pipeline.ingest.game_summary_resource"
+                    ) as mock_summary:
+                        # Configure mocks
+                        mock_pipeline_instance = Mock()
+                        mock_pipeline_instance.run.return_value = Mock(
+                            loads_ids=["test"], has_failed_jobs=False
+                        )
+                        mock_pipeline.return_value = mock_pipeline_instance
 
-                # Should be called (for dates between 2024-10-01 and 2025-06-30)
-                assert mock_ingest.call_count > 0
+                        backfill_box_scores(
+                            season_end_year=2025,
+                            db_path=str(db_path),
+                        )
 
-                # Check first and last calls use expected date range
-                calls = mock_ingest.call_args_list
-                first_date = calls[0][0][0]  # First positional arg
-                last_date = calls[-1][0][0]  # First positional arg
+                        # Should create one pipeline
+                        assert mock_pipeline.call_count == 1
 
-                assert first_date >= date(2024, 10, 1)
-                assert last_date <= date(2025, 6, 30)
+                        # Check scoreboard was called with correct date range
+                        assert mock_scoreboard.call_count == 1
+                        scoreboard_args = mock_scoreboard.call_args[0]
+                        assert scoreboard_args[0] == date(2024, 10, 1)  # start date
+                        assert scoreboard_args[1] == date(2025, 6, 30)  # end date
+
+                        # Game summary should be called many times (273 days in season)
+                        assert mock_summary.call_count > 200
 
 
 class TestResourceConfiguration:
@@ -243,5 +276,3 @@ class TestResourceConfiguration:
         assert dates[0] == date(2024, 10, 15)
         assert dates[1] == date(2024, 10, 16)
         assert dates[2] == date(2024, 10, 17)
-
-

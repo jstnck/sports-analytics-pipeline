@@ -9,6 +9,7 @@ ENVIRONMENT = os.environ.get("SPORTS_ANALYTICS_ENV", "dev").lower()
 # Local database path
 LOCAL_DB_PATH = Path("data/sports_analytics.duckdb")
 
+
 def get_motherduck_database() -> str:
     """Get the MotherDuck database name for current environment."""
     if ENVIRONMENT == "prod":

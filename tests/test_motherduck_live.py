@@ -2,6 +2,7 @@
 Live integration tests for MotherDuck connectivity.
 These tests verify that the MotherDuck integration works end-to-end.
 """
+
 from __future__ import annotations
 
 import os
@@ -36,19 +37,19 @@ def test_motherduck_connection() -> None:
     original_env = os.environ.get("SPORTS_ANALYTICS_ENV")
     try:
         os.environ["SPORTS_ANALYTICS_ENV"] = "dev"
-        
+
         destination = get_dlt_destination("motherduck", "")
         pipeline = dlt.pipeline(
-            pipeline_name="test_motherduck_pipeline", 
-            destination=destination, 
-            dataset_name="ingest"
+            pipeline_name="test_motherduck_pipeline",
+            destination=destination,
+            dataset_name="ingest",
         )
-        
+
         # Test basic connectivity
         with pipeline.sql_client() as conn:
             result = conn.execute("SELECT 1").fetchone()
             assert result is not None
-            
+
     finally:
         if original_env is not None:
             os.environ["SPORTS_ANALYTICS_ENV"] = original_env
@@ -56,7 +57,7 @@ def test_motherduck_connection() -> None:
             del os.environ["SPORTS_ANALYTICS_ENV"]
 
 
-@pytest.mark.live  
+@pytest.mark.live
 def test_motherduck_schema_query() -> None:
     """Test querying MotherDuck schema information."""
     if not has_motherduck_token():
@@ -65,14 +66,14 @@ def test_motherduck_schema_query() -> None:
     original_env = os.environ.get("SPORTS_ANALYTICS_ENV")
     try:
         os.environ["SPORTS_ANALYTICS_ENV"] = "dev"
-        
+
         destination = get_dlt_destination("motherduck", "")
         pipeline = dlt.pipeline(
             pipeline_name="test_schema_query",
             destination=destination,
-            dataset_name="ingest"
+            dataset_name="ingest",
         )
-        
+
         # Verify we can query schema information
         with pipeline.sql_client() as client:
             result = client.execute(
@@ -80,7 +81,7 @@ def test_motherduck_schema_query() -> None:
             ).fetchone()
             assert result is not None
             assert isinstance(result[0], int)
-            
+
     finally:
         if original_env is not None:
             os.environ["SPORTS_ANALYTICS_ENV"] = original_env

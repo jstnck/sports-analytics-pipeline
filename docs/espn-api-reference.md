@@ -603,7 +603,7 @@ curl -s "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/transactio
 1. **No official API documentation**: This is reverse-engineered from public endpoints
 2. **No SLA or guarantees**: ESPN can change the API structure without notice
 3. **Seasonal availability**: Some data only available during NBA season (October-June)
-4. **Real-time delays**: Live game data may have 10-30 second delays
+4. **Real-time delays**: Live game data may have 10-30+ second delays
 5. **Historical data**: Limited historical data availability - focus on current season
 
 ## Related Endpoints (Not Fully Explored)

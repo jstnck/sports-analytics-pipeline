@@ -4,17 +4,17 @@ This app is a NBA data ingestion pipeline that collects game data from ESPN's pu
 
 ## Features
 
-- **Data ingestion**: Season schedules, teams, venues, box scores, and player statistics
+- **Data ingestion**: Scoreboards, game summaries, teams, and rosters from ESPN API
 - **Dual storage**: Local DuckDB files or MotherDuck cloud database
 - **Environment separation**: Dev/prod database isolation via `SPORTS_ANALYTICS_ENV`
 - **CLI interface**: Command-line tools for all ingestion operations
-- **Selective ingestion**: Choose specific tables and date ranges
+- **Selective ingestion**: Choose specific resources and date ranges
 
 ## Quick Start
 
 ```bash
-# Initialize database
-python main.py --init-db
+# Run demo
+python main.py --demo
 
 # Ingest current season schedule
 python main.py --season-schedule 2025
@@ -22,8 +22,14 @@ python main.py --season-schedule 2025
 # Ingest data for specific date
 python main.py --date 2024-12-25
 
-# Run demo
-python main.py --demo
+# Ingest reference data (teams & rosters)
+python main.py --reference
+
+# Backfill box scores for date range
+python main.py --backfill 2024 --start 2024-01-01 --end 2024-01-31
+
+# Select specific resources only
+python main.py --date 2024-12-25 --tables scoreboard,game_summary
 ```
 
 ## Development
@@ -50,12 +56,12 @@ Data is stored in `data/sports_analytics.duckdb` with all tables in the `ingest`
 - Database selection controlled by `SPORTS_ANALYTICS_ENV` environment variable
 - Credentials configured in `.dlt/secrets.toml`
 
-## Available Tables
+## Available Resources
 
-- `schedule`: Game schedules with dates, teams, and venues
+- `scoreboard`: Game schedules, scores, and status
+- `game_summary`: Detailed game summaries and box scores
 - `teams`: Team information and metadata  
-- `venues`: Arena/stadium information
-- `box_score`: Team-level game statistics
-- `player_box_score`: Individual player game statistics
+- `rosters`: Player rosters by team
+
 
 New tables can be easily added using the current API -> DLT -> DuckDB archecture.
