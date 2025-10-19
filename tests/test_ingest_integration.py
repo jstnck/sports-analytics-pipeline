@@ -9,7 +9,7 @@ from __future__ import annotations
 import tempfile
 from datetime import date
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, MagicMock
 
 
 from sports_analytics_pipeline.ingest import (
@@ -23,7 +23,7 @@ class TestDltIngestionFunctions:
     """Test main dlt ingestion functions with mocked data."""
 
     @patch("sports_analytics_pipeline.ingest.rest_api_source")
-    def test_ingest_season_schedule_basic(self, mock_rest_api_source) -> None:
+    def test_ingest_season_schedule_basic(self, mock_rest_api_source: MagicMock) -> None:
         """Test season schedule ingestion with minimal mock data."""
         # Mock the REST API source and response
         mock_resource = Mock()
@@ -88,24 +88,43 @@ class TestDltIngestionFunctions:
             assert mock_rest_api_source.called
 
     @patch("sports_analytics_pipeline.ingest.rest_api_source")
-    @patch("sports_analytics_pipeline.ingest.schedule_resource")
     def test_ingest_date_basic(
-        self, mock_schedule_resource, mock_rest_api_source
+        self, mock_rest_api_source: MagicMock
     ) -> None:
         """Test daily data ingestion with minimal mock data."""
-        # Mock schedule resource to return some game data
-        mock_schedule_resource.return_value = [
-            {
-                "espn_event_id": "401654321",
-                "date": "2024-10-15",
-                "away_team": "Boston Celtics",
-                "home_team": "Los Angeles Lakers",
-            }
-        ]
+        # Mock REST API source for both scoreboard and game summary data
+        mock_scoreboard_resource = Mock()
+        mock_scoreboard_resource.__iter__ = Mock(
+            return_value=iter(
+                [
+                    {
+                        "events": [
+                            {
+                                "id": "401654321",
+                                "date": "2024-10-15T20:00:00Z",
+                                "competitions": [
+                                    {
+                                        "competitors": [
+                                            {
+                                                "homeAway": "home",
+                                                "team": {"displayName": "Los Angeles Lakers"},
+                                            },
+                                            {
+                                                "homeAway": "away", 
+                                                "team": {"displayName": "Boston Celtics"},
+                                            },
+                                        ],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            )
+        )
 
-        # Mock REST API source for summary data
-        mock_resource = Mock()
-        mock_resource.__iter__ = Mock(
+        mock_summary_resource = Mock()
+        mock_summary_resource.__iter__ = Mock(
             return_value=iter(
                 [
                     {
@@ -134,9 +153,17 @@ class TestDltIngestionFunctions:
             )
         )
 
-        mock_source = Mock()
-        mock_source.resources = {"summary_000": mock_resource}
-        mock_rest_api_source.return_value = mock_source
+        # Mock different responses for different calls
+        def mock_rest_api_side_effect(config):
+            mock_source = Mock()
+            # Check if this is a scoreboard or summary call based on resources
+            if config.get("resources", [{}])[0].get("name") == "scoreboard_data":
+                mock_source.resources = {"scoreboard_data": mock_scoreboard_resource}
+            else:
+                mock_source.resources = {"summary_000": mock_summary_resource}
+            return mock_source
+
+        mock_rest_api_source.side_effect = mock_rest_api_side_effect
 
         # Use a temporary database
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -148,8 +175,8 @@ class TestDltIngestionFunctions:
             # Should not raise an exception
             ingest_date(target_date=target_date, db_path=str(db_path))
 
-            # Verify schedule resource was called
-            assert mock_schedule_resource.called
+            # Verify REST API source was called
+            assert mock_rest_api_source.called
 
     def test_backfill_box_scores_date_range(self) -> None:
         """Test that backfill function handles date ranges correctly."""

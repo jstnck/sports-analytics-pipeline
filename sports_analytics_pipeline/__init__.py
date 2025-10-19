@@ -8,11 +8,9 @@ from .ingest import (
     ingest_date,
     backfill_box_scores,
 )
-from .schema import init_db
 
 __all__ = [
     "ingest_season_schedule",
     "ingest_date",
     "backfill_box_scores",
-    "init_db",
 ]

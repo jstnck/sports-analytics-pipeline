@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 from sports_analytics_pipeline.ingest import (
@@ -18,13 +18,53 @@ from sports_analytics_pipeline.ingest import (
     ingest_date,
     backfill_box_scores,
 )
-from sports_analytics_pipeline.schema import init_db
+from sports_analytics_pipeline.config import ENVIRONMENT, LOCAL_DB_PATH, get_motherduck_database
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+# Resource configuration constants
+RESOURCE_CATEGORIES = {
+    "all": {'scoreboard', 'game_summary', 'teams', 'rosters'},
+    "reference": {'teams', 'rosters'}
+}
+
+
+def parse_date_safe(date_str: str, field_name: str) -> date:
+    """Parse date string with proper error handling."""
+    try:
+        return date.fromisoformat(date_str)
+    except ValueError as e:
+        raise ValueError(f"Invalid {field_name} format '{date_str}'. Use YYYY-MM-DD format.") from e
+
+
+def execute_cli_operation(args, operation_name: str, operation_func, **kwargs):
+    """Execute operation with standardized logging and error handling."""
+    # Log operation start
+    logger.info(f"Ingesting {operation_name} to {args.storage}")
+    
+    # Log operation details
+    details = {k: v for k, v in kwargs.items() if k.endswith('_date') or k == 'season_end_year'}
+    for key, value in details.items():
+        if value is not None:
+            logger.info(f"{key}: {value}")
+    
+    # Log selected resources
+    tables = kwargs.get('tables')  # Fixed: use 'tables' not 'selected_tables'
+    if tables:
+        logger.info(f"Resources to ingest: {', '.join(sorted(tables))}")
+    
+    # Execute the operation
+    result = operation_func(**kwargs)
+    
+    # Log success
+    logger.info(f"{operation_name} ingestion completed successfully")
+    
+    return result
 
 
 def main() -> None:
@@ -34,29 +74,32 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Initialize database with schema
-  python main.py --init-db
-
   # Ingest full 2024-25 season schedule
   python main.py --season-schedule 2025
 
-  # Ingest data for a specific date (all tables)
+    # Ingest data for a specific date (all resources)
   python main.py --date 2024-12-25
 
-  # Ingest data for a specific date (specific tables)
-  python main.py --date 2024-12-25 --tables schedule,teams
-  python main.py --date 2024-12-25 --tables box_score
+  # Ingest data for a specific date (specific resources)
+  python main.py --date 2024-12-25 --tables scoreboard,game_summary
+  python main.py --date 2024-12-25 --tables scoreboard
 
-  # Backfill box scores for date range
+  # Backfill data for a date range
   python main.py --backfill 2025 --start 2024-10-01 --end 2024-12-31
 
-  # Backfill specific tables only
-  python main.py --backfill 2025 --start 2024-10-01 --end 2024-12-31 --tables player_box_score,box_score
+  # Backfill specific resources only
+  python main.py --backfill 2025 --start 2024-10-01 --end 2024-12-31 --tables game_summary
 
-  # Run a quick demo
+  # Demo with 3 days of data from October 2024
   python main.py --demo
 
-Available tables: schedule, teams, venues, box_score, player_box_score
+  # Ingest reference data (teams and rosters)
+  python main.py --reference
+
+  # Ingest specific reference data only
+  python main.py --reference --tables teams
+
+Available resources: scoreboard, game_summary, teams, rosters
         """,
     )
 
@@ -64,32 +107,34 @@ Available tables: schedule, teams, venues, box_score, player_box_score
     parser.add_argument(
         "--db-path",
         type=str,
-        default="data/games.duckdb",
-        help="Path to DuckDB database file (default: data/games.duckdb)",
+        default=str(LOCAL_DB_PATH),
+        help=f"Path to DuckDB database file for local storage (default: {LOCAL_DB_PATH}). Ignored for MotherDuck storage.",
     )
-
-    # Database initialization
+    
+    # Storage backend configuration
     parser.add_argument(
-        "--init-db",
-        action="store_true",
-        help="Initialize database with schema (creates tables)",
+        "--storage",
+        type=str,
+        choices=["local", "motherduck"],
+        default="local",
+        help="Storage backend: 'local' for local DuckDB file, 'motherduck' for MotherDuck cloud (default: local)",
     )
 
     # Table selection
     parser.add_argument(
         "--tables",
         type=str,
-        help="Comma-separated list of tables to ingest (e.g., 'schedule,teams' or 'box_score'). "
-             "Available tables: schedule, teams, venues, box_score, player_box_score. "
-             "If not specified, all applicable tables will be ingested.",
+        help="Comma-separated list of resources to ingest (e.g., 'scoreboard,game_summary' or 'scoreboard'). "
+             "Available resources: scoreboard, game_summary, teams, rosters. "
+             "If not specified, all applicable resources will be ingested.",
     )
 
     # API rate limiting
     parser.add_argument(
         "--delay",
         type=float,
-        default=0.5,
-        help="Base delay between API calls in seconds (default: 0.5, min: 0.1, max: 5.0)",
+        default=0.2,
+        help="Base delay between API calls in seconds (default: 0.2, min: 0.05, max: 2.0)",
     )
 
     # Demo mode
@@ -102,7 +147,7 @@ Available tables: schedule, teams, venues, box_score, player_box_score
     # Operation type
     group = parser.add_mutually_exclusive_group(
         required=False
-    )  # Not required if --demo or --init-db is used
+    )  # Not required if --demo is used
     group.add_argument(
         "--season-schedule",
         type=int,
@@ -117,6 +162,11 @@ Available tables: schedule, teams, venues, box_score, player_box_score
         "--backfill",
         type=int,
         help="Backfill box scores for season (provide season end year)",
+    )
+    group.add_argument(
+        "--reference",
+        action="store_true",
+        help="Ingest reference data (teams and rosters)",
     )
 
     # Date range options for backfill
@@ -133,158 +183,170 @@ Available tables: schedule, teams, venues, box_score, player_box_score
 
     args = parser.parse_args()
 
+    # Show environment configuration
+    logger.info(f"Environment: {ENVIRONMENT} | "
+                f"MotherDuck DB: {get_motherduck_database()} | "
+                f"Storage: {args.storage}")
+    if ENVIRONMENT == "prod":
+        logger.warning("⚠️  RUNNING IN PRODUCTION MODE - using sports_analytics_prod database")
+
     # Parse table selection
     selected_tables = None
     if args.tables:
-        available_tables = {'schedule', 'teams', 'venues', 'box_score', 'player_box_score'}
+        available_tables = RESOURCE_CATEGORIES["all"]
         selected_tables = set(t.strip() for t in args.tables.split(','))
         invalid_tables = selected_tables - available_tables
         if invalid_tables:
-            parser.error(f"Invalid table(s): {', '.join(invalid_tables)}. "
-                        f"Available tables: {', '.join(sorted(available_tables))}")
-
-    # Handle database initialization
-    if args.init_db:
-        logger.info(f"Initializing database: {args.db_path}")
-        init_db(args.db_path)
-        logger.info("Database initialization completed successfully")
-        return
+            parser.error(f"Invalid resource(s): {', '.join(invalid_tables)}. "
+                        f"Available resources: {', '.join(sorted(available_tables))}")
 
     # Handle demo mode
     if args.demo:
-        run_demo(args.db_path, selected_tables, delay=args.delay)
+        run_demo(args.db_path, selected_tables, delay=args.delay, storage=args.storage)
         return
 
-    # Validate that one operation is specified (if not demo or init-db)
+    # Validate that one operation is specified
     if not any(
         [
             args.season_schedule,
             args.date,
             args.backfill,
+            args.reference,
         ]
     ):
         parser.error(
-            "one of the arguments --season-schedule --date --backfill is required (or use --demo or --init-db)"
+            "one of the arguments --season-schedule --date --backfill --reference is required (or use --demo)"
         )
 
     try:
         db_path = Path(args.db_path)
 
         if args.season_schedule:
-            if selected_tables and not {'schedule', 'teams', 'venues'}.intersection(selected_tables):
-                logger.warning("Season schedule ingestion only affects schedule, teams, and venues tables")
+            if selected_tables and 'scoreboard' not in selected_tables:
+                logger.warning("Season schedule ingestion only affects the scoreboard resource")
             
-            logger.info(
-                f"Ingesting season schedule for season ending {args.season_schedule}"
+            execute_cli_operation(
+                args,
+                "season schedule",
+                ingest_season_schedule,
+                season_end_year=args.season_schedule,  # Note: parameter name is 'season_end_year'
+                db_path=db_path,
+                tables=selected_tables,  # Note: parameter name is 'tables'
+                storage=args.storage
             )
-            ingest_season_schedule(args.season_schedule, db_path, selected_tables)
-            logger.info("Season schedule ingestion completed successfully")
 
         elif args.date:
-            target_date = date.fromisoformat(args.date)
-            logger.info(f"Ingesting data for date {target_date}")
-            if selected_tables:
-                logger.info(f"Tables to ingest: {', '.join(sorted(selected_tables))}")
-            ingest_date(target_date, db_path, selected_tables)
-            logger.info("Daily ingestion completed successfully")
+            target_date = parse_date_safe(args.date, "date")
+            execute_cli_operation(
+                args,
+                "daily data",
+                ingest_date,
+                target_date=target_date,
+                db_path=db_path,
+                tables=selected_tables,  # Note: parameter name is 'tables'
+                storage=args.storage
+            )
 
         elif args.backfill:
-            start_date = date.fromisoformat(args.start) if args.start else None
-            end_date = date.fromisoformat(args.end) if args.end else None
+            # Parse dates with error handling
+            start_date = parse_date_safe(args.start, "start date") if args.start else None
+            end_date = parse_date_safe(args.end, "end date") if args.end else None
 
-            logger.info(f"Backfilling box scores for season ending {args.backfill}")
-            if start_date:
-                logger.info(f"Start date: {start_date}")
-            if end_date:
-                logger.info(f"End date: {end_date}")
-            if selected_tables:
-                logger.info(f"Tables to ingest: {', '.join(sorted(selected_tables))}")
-
-            backfill_box_scores(
-                args.backfill, db_path, start=start_date, end=end_date, 
-                tables=selected_tables, delay=args.delay
+            execute_cli_operation(
+                args,
+                "box score backfill",
+                backfill_box_scores,
+                season_end_year=args.backfill,  # Note: parameter name is 'season_end_year'
+                db_path=db_path,
+                start=start_date,
+                end=end_date,
+                tables=selected_tables,  # Note: parameter name is 'tables'
+                delay=args.delay,
+                storage=args.storage,
+                start_date=start_date,  # For logging
+                end_date=end_date       # For logging
             )
-            logger.info("Box score backfill completed successfully")
+
+        elif args.reference:
+            # Validate reference tables
+            if selected_tables:
+                reference_tables = RESOURCE_CATEGORIES["reference"]
+                invalid_reference = selected_tables - reference_tables
+                if invalid_reference:
+                    logger.warning(f"Non-reference resources ignored: {', '.join(invalid_reference)}")
+                    selected_tables = selected_tables.intersection(reference_tables)
+            
+            from sports_analytics_pipeline.ingest import ingest_reference_data
+            execute_cli_operation(
+                args,
+                "reference data",
+                ingest_reference_data,
+                db_path=db_path,
+                tables=selected_tables,  # Note: parameter name is 'tables', not 'selected_tables'
+                storage=args.storage
+            )
 
     except Exception as e:
         logger.error(f"Pipeline execution failed: {e}")
         raise
 
 
-def run_demo(db_path: str, selected_tables: set[str] | None = None, delay: float = 0.5) -> None:
-    """Run a quick demonstration of the dlt pipeline."""
-    logger.info("Running dlt pipeline demo...")
-
-    # Ingest last 3 days of NBA data
-    today = date.today()
-    dates_to_ingest = [today - timedelta(days=i) for i in range(1, 4)]
+def run_demo(db_path: str, selected_tables: set[str] | None = None, delay: float = 0.2, storage: str = "local") -> None:
+    """Run a quick demonstration of the dlt pipeline focused on last 3 days of October 2024."""
+    logger.info("Running dlt pipeline demo (last 3 days of October 2024)...")
 
     db_path_obj = Path(db_path)
 
-    logger.info("Demo: Ingesting schedule data for current season...")
-    # Get current NBA season end year (if it's before July, use current year, else next year)
-    current_season_end = today.year + 1 if today.month >= 7 else today.year
-    if selected_tables:
-        logger.info(f"Demo: Tables to ingest: {', '.join(sorted(selected_tables))}")
-    ingest_season_schedule(current_season_end, db_path_obj, selected_tables)
+    # Focus on just the last 3 days of October 2024 for speed
+    demo_dates = [
+        date(2024, 10, 29),  # Oct 29
+        date(2024, 10, 30),  # Oct 30  
+        date(2024, 10, 31),  # Oct 31 (last day of October)
+    ]
 
-    logger.info("Demo: Ingesting daily data for recent dates...")
-    for demo_date in dates_to_ingest:
+    logger.info("Demo: Ingesting data for last 3 days of October 2024 only...")
+    if selected_tables:
+        logger.info(f"Demo: Resources to ingest: {', '.join(sorted(selected_tables))}")
+    
+    # Skip schedule ingestion entirely - just do daily data for the 3 dates
+    
+    logger.info("Demo: Ingesting daily data for last 3 days of October 2024...")
+    for demo_date in demo_dates:
         logger.info(f"  Processing {demo_date}")
         try:
-            ingest_date(demo_date, db_path_obj, selected_tables, delay=delay)
+            ingest_date(demo_date, db_path_obj, selected_tables, delay=delay, storage=storage)
+            logger.info(f"  ✓ Completed {demo_date}")
         except Exception as e:
-            logger.warning(f"  Failed to process {demo_date}: {e}")
+            logger.warning(f"  ✗ Failed to process {demo_date}: {e}")
 
-    # Show what was created
+    # Show what was created (simplified)
+    logger.info("Demo: Checking ingested data...")
     try:
-        import duckdb
-
-        conn = duckdb.connect(str(db_path_obj))
-
-        logger.info("Demo: Database contents after ingestion:")
-
-        # Check schedule table
-        try:
-            schedule_count = conn.execute(
-                "SELECT COUNT(*) FROM main.schedule"
-            ).fetchone()[0]
-            logger.info(f"  schedule: {schedule_count} rows")
-        except Exception:
-            logger.info("  schedule: table not found")
-
-        # Check teams table
-        try:
-            teams_count = conn.execute("SELECT COUNT(*) FROM main.teams").fetchone()[0]
-            logger.info(f"  teams: {teams_count} rows")
-        except Exception:
-            logger.info("  teams: table not found")
-
-        # Check player_box_score table
-        try:
-            players_count = conn.execute(
-                "SELECT COUNT(*) FROM main.player_box_score"
-            ).fetchone()[0]
-            logger.info(f"  player_box_score: {players_count} rows")
-        except Exception:
-            logger.info("  player_box_score: table not found")
-
-        # Check box_score table
-        try:
-            box_score_count = conn.execute(
-                "SELECT COUNT(*) FROM main.box_score"
-            ).fetchone()[0]
-            logger.info(f"  box_score: {box_score_count} rows")
-        except Exception:
-            logger.info("  box_score: table not found")
-
-        conn.close()
-
+        if storage == "local":
+            import duckdb
+            conn = duckdb.connect(str(db_path_obj))
+            tables = ["scoreboard", "game_summary"]  # Updated to match current raw data schema
+            for table in tables:
+                try:
+                    result = conn.execute(f"SELECT COUNT(*) FROM ingest.{table}").fetchone()
+                    if result:
+                        count = result[0]
+                        logger.info(f"  {table}: {count} rows")
+                    else:
+                        logger.info(f"  {table}: no data")
+                except Exception:
+                    logger.info(f"  {table}: not found")
+            conn.close()
+        else:
+            logger.info("  MotherDuck: Check web interface for results")
     except Exception as e:
-        logger.warning(f"Could not inspect database: {e}")
+        logger.info(f"  Could not check results: {e}")
 
-    logger.info("Demo completed! Check the database file for results.")
-    logger.info(f"Database location: {db_path_obj.absolute()}")
+    logger.info("Demo completed!")
+    if storage == "local":
+        logger.info(f"Local database: {db_path_obj.absolute()}")
+    else:
+        logger.info(f"MotherDuck database: {get_motherduck_database()}.ingest")
 
 
 if __name__ == "__main__":

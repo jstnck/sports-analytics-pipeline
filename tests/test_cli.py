@@ -9,22 +9,18 @@ from unittest.mock import patch
 import pytest
 
 # Import main functions to test
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 import main
 
 
 class TestCLIArgumentParsing:
     """Test CLI argument parsing and validation."""
 
-    def test_init_db_argument(self) -> None:
-        """Test --init-db argument parsing."""
-        with patch('main.init_db') as mock_init:
-            with patch('sys.argv', ['main.py', '--init-db']):
-                main.main()
-                mock_init.assert_called_once_with('data/games.duckdb')
-
     def test_tables_argument_validation_valid(self) -> None:
         """Test valid table names are accepted."""
-        valid_tables = ['box_score', 'player_box_score']
+        valid_tables = ['scoreboard', 'game_summary']
         
         with patch('main.ingest_date') as mock_ingest:
             with patch('sys.argv', ['main.py', '--date', '2024-10-23', '--tables', ','.join(valid_tables)]):
@@ -47,20 +43,20 @@ class TestCLITableSelection:
     def test_date_ingestion_with_table_selection(self) -> None:
         """Test date ingestion with specific tables."""
         with patch('main.ingest_date') as mock_ingest:
-            with patch('sys.argv', ['main.py', '--date', '2024-10-23', '--tables', 'box_score,player_box_score']):
+            with patch('sys.argv', ['main.py', '--date', '2024-10-23', '--tables', 'scoreboard,game_summary']):
                 main.main()
                 
                 args, kwargs = mock_ingest.call_args
                 target_date, db_path, tables = args
                 
                 assert str(target_date) == '2024-10-23'
-                assert tables == {'box_score', 'player_box_score'}
+                assert tables == {'scoreboard', 'game_summary'}
 
     def test_backfill_with_table_selection(self) -> None:
         """Test backfill with specific tables."""
         with patch('main.backfill_box_scores') as mock_backfill:
             with patch('sys.argv', ['main.py', '--backfill', '2025', '--start', '2024-10-01', 
-                                  '--end', '2024-10-31', '--tables', 'box_score']):
+                                  '--end', '2024-10-31', '--tables', 'game_summary']):
                 main.main()
                 
                 # Check that backfill_box_scores was called with correct arguments
@@ -68,7 +64,7 @@ class TestCLITableSelection:
                 args, kwargs = mock_backfill.call_args
                 
                 assert args[0] == 2025  # season_end_year
-                assert kwargs['tables'] == {'box_score'}
+                assert kwargs['tables'] == {'game_summary'}
 
 
 class TestCLIErrorHandling:
