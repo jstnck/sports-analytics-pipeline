@@ -40,6 +40,6 @@ uv run python main.py --all [--storage motherduck] [--depth 2]
 
 **Resources:** `scoreboard` (schedules/scores), `game_summary` (detailed stats), `teams` (metadata), `rosters` (players)
 
-**Storage:** Local DuckDB or MotherDuck cloud with 'dev' and 'prod' databases)
+**Storage:** Local DuckDB or MotherDuck cloud with 'dev' and 'prod' databases
 
 **Setup:** `uv sync` to install, configure MotherDuck credentials in `.dlt/secrets.toml`
