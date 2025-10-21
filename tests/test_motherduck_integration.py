@@ -82,7 +82,7 @@ class TestCLIIntegration:
 
         # Test invalid storage backend
         result = subprocess.run(
-            [sys.executable, "main.py", "--init-db", "--storage", "invalid"],
+            [sys.executable, "main.py", "--all", "--storage", "invalid"],
             capture_output=True,
             text=True,
             cwd="/home/justin/projects/scraping-testing/sports-analytics-pipeline",

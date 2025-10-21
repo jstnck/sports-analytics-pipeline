@@ -1,67 +1,45 @@
 # Sports Analytics Pipeline
 
-This app is a NBA data ingestion pipeline that collects game data from ESPN's public API and stores it in a DuckDB / Motherduck staging layer. It handles ingestion for a single source as part of a larger Sports Analytics DataWarehouse project. 
+NBA data ingestion pipeline that collects data from ESPN's public API and loads it into DuckDB or MotherDuck cloud database.
 
-## Features
+## CLI Commands
 
-- **Data ingestion**: Scoreboards, game summaries, teams, and rosters from ESPN API
-- **Dual storage**: Local DuckDB files or MotherDuck cloud database
-- **Environment separation**: Dev/prod database isolation via `SPORTS_ANALYTICS_ENV`
-- **CLI interface**: Command-line tools for all ingestion operations
-- **Selective ingestion**: Choose specific resources and date ranges
+The pipeline provides several ingestion modes:
 
-## Quick Start
-
+**Reference Data** - Load static team and roster information:
 ```bash
-# Run demo
-python main.py --demo
-
-# Ingest current season schedule
-python main.py --season-schedule 2025
-
-# Ingest data for specific date
-python main.py --date 2024-12-25
-
-# Ingest reference data (teams & rosters)
-python main.py --reference
-
-# Backfill box scores for date range
-python main.py --backfill 2024 --start 2024-01-01 --end 2024-01-31
-
-# Select specific resources only
-python main.py --date 2024-12-25 --tables scoreboard,game_summary
+uv run python main.py --reference [--tables teams,rosters]
 ```
 
-## Development
-
+**Season Schedule** - Load complete season schedule for a given year:
 ```bash
-# Install dependencies
-uv sync
-
-# Run tests (includes live MotherDuck integration tests)
-uv run pytest
-
-# Run demo
-uv run python main.py --demo
+uv run python main.py --season-schedule 2025
 ```
 
-## Data Storage
+**Daily Data** - Load scoreboard and game summaries for specific date:
+```bash
+uv run python main.py --date 2024-12-25 [--tables scoreboard,game_summary]
+```
 
-### Local Storage
-Data is stored in `data/sports_analytics.duckdb` with all tables in the `ingest` schema.
+**Historical Backfill** - Load data for date ranges:
+```bash
+uv run python main.py --backfill 2025 --start 2024-10-29 --end 2024-10-31
+```
 
-### MotherDuck Cloud Storage
-- **Development**: `sports_analytics_dev.ingest` (default)
-- **Production**: `sports_analytics_prod.ingest` 
-- Database selection controlled by `SPORTS_ANALYTICS_ENV` environment variable
-- Credentials configured in `.dlt/secrets.toml`
+**All Resources** - Load teams, rosters, schedule, and available games:
+```bash
+uv run python main.py --all [--storage motherduck] [--depth 2]
+```
 
-## Available Resources
+**Options:**
+- `--storage`: Choose `duckdb` (default) or `motherduck`  
+- `--tables`: Comma-separated list to filter resources
+- `--depth`: dlt JSON nesting level
 
-- `scoreboard`: Game schedules, scores, and status
-- `game_summary`: Detailed game summaries and box scores
-- `teams`: Team information and metadata  
-- `rosters`: Player rosters by team
+## Data & Configuration
 
+**Resources:** `scoreboard` (schedules/scores), `game_summary` (detailed stats), `teams` (metadata), `rosters` (players)
 
-New tables can be easily added using the current API -> DLT -> DuckDB archecture.
+**Storage:** Local DuckDB or MotherDuck cloud with 'dev' and 'prod' databases)
+
+**Setup:** `uv sync` to install, configure MotherDuck credentials in `.dlt/secrets.toml`

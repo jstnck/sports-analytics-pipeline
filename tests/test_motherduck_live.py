@@ -42,7 +42,7 @@ def test_motherduck_connection() -> None:
         pipeline = dlt.pipeline(
             pipeline_name="test_motherduck_pipeline",
             destination=destination,
-            dataset_name="ingest",
+            dataset_name="raw",
         )
 
         # Test basic connectivity
@@ -71,13 +71,13 @@ def test_motherduck_schema_query() -> None:
         pipeline = dlt.pipeline(
             pipeline_name="test_schema_query",
             destination=destination,
-            dataset_name="ingest",
+            dataset_name="raw",
         )
 
         # Verify we can query schema information
         with pipeline.sql_client() as client:
             result = client.execute(
-                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'ingest'"
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'raw'"
             ).fetchone()
             assert result is not None
             assert isinstance(result[0], int)

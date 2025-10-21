@@ -16,9 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from sports_analytics_pipeline.ingest import (
-    ingest_season_schedule,
-    ingest_date,
-    backfill_box_scores,
+    run_espn_source,
 )
 from sports_analytics_pipeline.config import (
     ENVIRONMENT,
@@ -43,6 +41,19 @@ RESOURCE_CATEGORIES = {
 }
 
 
+def get_resource_selection(selected_tables: set[str] | None) -> dict[str, bool]:
+    """Determine which resources to include based on table selection.
+    
+    Returns a dictionary with include_* flags for all resource types.
+    """
+    return {
+        "include_teams": selected_tables is None or "teams" in selected_tables,
+        "include_rosters": selected_tables is None or "rosters" in selected_tables,
+        "include_schedule": selected_tables is None or "scoreboard" in selected_tables,
+        "include_game_summary": selected_tables is None or "game_summary" in selected_tables,
+    }
+
+
 def parse_date_safe(date_str: str, field_name: str) -> date:
     """Parse date string with proper error handling."""
     try:
@@ -53,31 +64,44 @@ def parse_date_safe(date_str: str, field_name: str) -> date:
         ) from e
 
 
-def execute_cli_operation(
-    args: Any, operation_name: str, operation_func: Any, **kwargs: Any
+def execute_source_operation(
+    args: Any, 
+    operation_name: str,
+    **source_kwargs: Any
 ) -> None:
-    """Execute operation with standardized logging and error handling."""
-    # Log operation start
-    logger.info(f"Ingesting {operation_name} to {args.storage}")
+    """Execute ESPN source operation with simple logging and error handling."""
+    logger.info(f"Starting {operation_name} | Storage: {args.storage}")
+    
+    try:
+        run_espn_source(**source_kwargs)
+        logger.info(f"✅ {operation_name} completed successfully")
+    except Exception as e:
+        logger.error(f"❌ {operation_name} failed: {e}")
+        raise
 
-    # Log operation details
-    details = {
-        k: v for k, v in kwargs.items() if k.endswith("_date") or k == "season_end_year"
-    }
-    for key, value in details.items():
-        if value is not None:
-            logger.info(f"{key}: {value}")
 
-    # Log selected resources
-    tables = kwargs.get("tables")  # Fixed: use 'tables' not 'selected_tables'
-    if tables:
-        logger.info(f"Resources to ingest: {', '.join(sorted(tables))}")
-
-    # Execute operation
-    operation_func(**kwargs)
-
-    # Log success
-    logger.info(f"{operation_name} ingestion completed successfully")
+def run_all_resources(args: Any, db_path: Path) -> None:
+    """Run all ESPN API resources using the unified @dlt.source.
+    
+    Simply runs all resources in a single operation using the standard execution path.
+    """
+    logger.info("🚀 Running ALL ESPN API resources")
+    
+    # Get current season year (assuming it's 2025 for now)
+    current_season = 2025
+    
+    execute_source_operation(
+        args,
+        "all resources",
+        season_end_year=current_season,
+        include_teams=True,
+        include_rosters=True,
+        include_schedule=True,
+        include_game_summary=True,
+        max_table_nesting=args.depth,
+        db_path=db_path,
+        storage=args.storage,
+    )
 
 
 def main() -> None:
@@ -87,6 +111,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Run all resources in sequence (teams, rosters, schedule, backfill)
+  python main.py --all --storage motherduck
+
   # Ingest full 2024-25 season schedule
   python main.py --season-schedule 2025
 
@@ -104,7 +131,7 @@ Examples:
   python main.py --backfill 2025 --start 2024-10-01 --end 2024-12-31 --tables game_summary
 
   # Demo with 3 days of data from October 2024
-  python main.py --demo
+  python main.py --backfill 2025 --start 2024-10-29 --end 2024-10-31
 
   # Ingest reference data (teams and rosters)
   python main.py --reference
@@ -150,17 +177,17 @@ Available resources: scoreboard, game_summary, teams, rosters
         help="Base delay between API calls in seconds (default: 0.2, min: 0.05, max: 2.0)",
     )
 
-    # Demo mode
+    # JSON flattening configuration
     parser.add_argument(
-        "--demo",
-        action="store_true",
-        help="Run a quick demo ingesting last 3 days of data",
+        "--depth",
+        type=int,
+        default=None,
+        help="Maximum table nesting level for JSON flattening. "
+        "If not specified, uses DLT default. Use 0 for no nesting, 1 for minimal nesting.",
     )
 
     # Operation type
-    group = parser.add_mutually_exclusive_group(
-        required=False
-    )  # Not required if --demo is used
+    group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
         "--season-schedule",
         type=int,
@@ -180,6 +207,11 @@ Available resources: scoreboard, game_summary, teams, rosters
         "--reference",
         action="store_true",
         help="Ingest reference data (teams and rosters)",
+    )
+    group.add_argument(
+        "--all",
+        action="store_true",
+        help="Run all resources in sequence: teams, rosters, season schedule, and box score backfill",
     )
 
     # Date range options for backfill
@@ -217,12 +249,7 @@ Available resources: scoreboard, game_summary, teams, rosters
             parser.error(
                 f"Invalid resource(s): {', '.join(invalid_tables)}. "
                 f"Available resources: {', '.join(sorted(available_tables))}"
-            )
-
-    # Handle demo mode
-    if args.demo:
-        run_demo(args.db_path, selected_tables, delay=args.delay, storage=args.storage)
-        return
+                )
 
     # Validate that one operation is specified
     if not any(
@@ -231,10 +258,11 @@ Available resources: scoreboard, game_summary, teams, rosters
             args.date,
             args.backfill,
             args.reference,
+            args.all,
         ]
     ):
         parser.error(
-            "one of the arguments --season-schedule --date --backfill --reference is required (or use --demo)"
+            "one of the arguments --season-schedule --date --backfill --reference --all is required"
         )
 
     try:
@@ -246,26 +274,34 @@ Available resources: scoreboard, game_summary, teams, rosters
                     "Season schedule ingestion only affects the scoreboard resource"
                 )
 
-            execute_cli_operation(
+            execute_source_operation(
                 args,
                 "season schedule",
-                ingest_season_schedule,
-                season_end_year=args.season_schedule,  # Note: parameter name is 'season_end_year'
+                season_end_year=args.season_schedule,
                 db_path=db_path,
-                tables=selected_tables,  # Note: parameter name is 'tables'
                 storage=args.storage,
+                include_teams=False,
+                include_rosters=False,
+                include_schedule=True,
+                include_game_summary=False,
+                max_table_nesting=args.depth,
             )
 
         elif args.date:
             target_date = parse_date_safe(args.date, "date")
-            execute_cli_operation(
+            
+            # Get resource selection based on table filters
+            resource_config = get_resource_selection(selected_tables)
+            
+            execute_source_operation(
                 args,
                 "daily data",
-                ingest_date,
-                target_date=target_date,
+                start_date=target_date,
+                end_date=target_date,
                 db_path=db_path,
-                tables=selected_tables,  # Note: parameter name is 'tables'
                 storage=args.storage,
+                max_table_nesting=args.depth,
+                **resource_config,
             )
 
         elif args.backfill:
@@ -275,21 +311,30 @@ Available resources: scoreboard, game_summary, teams, rosters
             )
             end_date = parse_date_safe(args.end, "end date") if args.end else None
 
-            execute_cli_operation(
+            # Get resource selection based on table filters
+            resource_config = get_resource_selection(selected_tables)
+
+            execute_source_operation(
                 args,
                 "box score backfill",
-                backfill_box_scores,
-                season_end_year=args.backfill,  # Note: parameter name is 'season_end_year'
+                season_end_year=args.backfill,
+                start_date=start_date,
+                end_date=end_date,
                 db_path=db_path,
-                start=start_date,
-                end=end_date,
-                tables=selected_tables,  # Note: parameter name is 'tables'
-                delay=args.delay,
                 storage=args.storage,
+                max_table_nesting=args.depth,
+                **resource_config,
             )
 
         elif args.reference:
-            # Validate reference tables
+            # Get resource selection based on table filters (reference only)
+            resource_config = get_resource_selection(selected_tables)
+            # Force disable non-reference resources
+            resource_config.update({
+                "include_schedule": False,
+                "include_game_summary": False,
+            })
+            
             if selected_tables:
                 reference_tables = RESOURCE_CATEGORIES["reference"]
                 invalid_reference = selected_tables - reference_tables
@@ -297,93 +342,22 @@ Available resources: scoreboard, game_summary, teams, rosters
                     logger.warning(
                         f"Non-reference resources ignored: {', '.join(invalid_reference)}"
                     )
-                    selected_tables = selected_tables.intersection(reference_tables)
 
-            from sports_analytics_pipeline.ingest import ingest_reference_data
-
-            execute_cli_operation(
+            execute_source_operation(
                 args,
                 "reference data",
-                ingest_reference_data,
                 db_path=db_path,
-                tables=selected_tables,  # Note: parameter name is 'tables', not 'selected_tables'
                 storage=args.storage,
+                max_table_nesting=args.depth,
+                **resource_config,
             )
+
+        elif args.all:
+            run_all_resources(args, db_path)
 
     except Exception as e:
         logger.error(f"Pipeline execution failed: {e}")
         raise
-
-
-def run_demo(
-    db_path: str,
-    selected_tables: set[str] | None = None,
-    delay: float = 0.2,
-    storage: str = "local",
-) -> None:
-    """Run a quick demonstration of the dlt pipeline focused on last 3 days of October 2024."""
-    logger.info("Running dlt pipeline demo (last 3 days of October 2024)...")
-
-    db_path_obj = Path(db_path)
-
-    # Focus on just the last 3 days of October 2024 for speed
-    demo_dates = [
-        date(2024, 10, 29),  # Oct 29
-        date(2024, 10, 30),  # Oct 30
-        date(2024, 10, 31),  # Oct 31 (last day of October)
-    ]
-
-    logger.info("Demo: Ingesting data for last 3 days of October 2024 only...")
-    if selected_tables:
-        logger.info(f"Demo: Resources to ingest: {', '.join(sorted(selected_tables))}")
-
-    # Skip schedule ingestion entirely - just do daily data for the 3 dates
-
-    logger.info("Demo: Ingesting daily data for last 3 days of October 2024...")
-    for demo_date in demo_dates:
-        logger.info(f"  Processing {demo_date}")
-        try:
-            ingest_date(
-                demo_date, db_path_obj, selected_tables, delay=delay, storage=storage
-            )
-            logger.info(f"  ✓ Completed {demo_date}")
-        except Exception as e:
-            logger.warning(f"  ✗ Failed to process {demo_date}: {e}")
-
-    # Show what was created (simplified)
-    logger.info("Demo: Checking ingested data...")
-    try:
-        if storage == "local":
-            import duckdb
-
-            conn = duckdb.connect(str(db_path_obj))
-            tables = [
-                "scoreboard",
-                "game_summary",
-            ]  # Updated to match current raw data schema
-            for table in tables:
-                try:
-                    result = conn.execute(
-                        f"SELECT COUNT(*) FROM ingest.{table}"
-                    ).fetchone()
-                    if result:
-                        count = result[0]
-                        logger.info(f"  {table}: {count} rows")
-                    else:
-                        logger.info(f"  {table}: no data")
-                except Exception:
-                    logger.info(f"  {table}: not found")
-            conn.close()
-        else:
-            logger.info("  MotherDuck: Check web interface for results")
-    except Exception as e:
-        logger.info(f"  Could not check results: {e}")
-
-    logger.info("Demo completed!")
-    if storage == "local":
-        logger.info(f"Local database: {db_path_obj.absolute()}")
-    else:
-        logger.info(f"MotherDuck database: {get_motherduck_database()}.ingest")
 
 
 if __name__ == "__main__":

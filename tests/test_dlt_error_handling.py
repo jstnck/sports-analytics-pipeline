@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import pytest
-from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
-import dlt
 from dlt.pipeline.exceptions import PipelineStepFailed
-from dlt.destinations.exceptions import DatabaseUndefinedRelation
 
-from sports_analytics_pipeline.ingest import _run_pipeline_with_recovery, get_dlt_destination
+from sports_analytics_pipeline.ingest import _run_pipeline_with_recovery
 
 
 class TestDLTErrorHandling:
@@ -30,88 +27,71 @@ class TestDLTErrorHandling:
         assert mock_pipeline.run.call_count == 1
         assert result.loads_ids == ["test_load_id"]
         
-    def test_run_pipeline_with_recovery_handles_table_not_exist_error(self):
-        """Test that recovery handles table truncation errors."""
+    def test_run_pipeline_with_recovery_retries_on_failure(self):
+        """Test that recovery retries on failure."""
         mock_pipeline = Mock()
         
-        # First call fails with table not exist error, second succeeds
-        table_error = PipelineStepFailed(
-            mock_pipeline, "load", "test_load_id", 
-            DatabaseUndefinedRelation("Table with name rosters__coach does not exist! DELETE FROM"), 
-            None
-        )
-        mock_pipeline.run.side_effect = [table_error, Mock(loads_ids=["recovered_load_id"])]
+        # First call fails, second succeeds
+        failure_error = Exception("Temporary failure")
+        mock_pipeline.run.side_effect = [failure_error, Mock(loads_ids=["recovered_load_id"])]
         
         mock_resources = [Mock()]
         
         result = _run_pipeline_with_recovery(mock_pipeline, mock_resources)
         
-        # Should call recovery methods and retry
+        # Should retry and succeed
         assert mock_pipeline.run.call_count == 2
-        assert mock_pipeline.drop_pending_packages.call_count == 1
-        assert mock_pipeline.sync_destination.call_count == 1
         assert result.loads_ids == ["recovered_load_id"]
         
     def test_run_pipeline_with_recovery_gives_up_after_max_attempts(self):
         """Test that recovery gives up after max retry attempts."""
         mock_pipeline = Mock()
         
-        # Always fails with table not exist error
-        table_error = PipelineStepFailed(
-            mock_pipeline, "load", "test_load_id", 
-            DatabaseUndefinedRelation("Table with name rosters__coach does not exist! DELETE FROM"), 
-            None
-        )
-        mock_pipeline.run.side_effect = table_error
+        # Always fails
+        failure_error = Exception("Persistent failure")
+        mock_pipeline.run.side_effect = failure_error
         
         mock_resources = [Mock()]
         
-        with pytest.raises(PipelineStepFailed):
+        with pytest.raises(Exception) as exc_info:
             _run_pipeline_with_recovery(mock_pipeline, mock_resources, max_attempts=2)
             
         # Should try twice and give up
         assert mock_pipeline.run.call_count == 2
-        assert mock_pipeline.drop_pending_packages.call_count == 1
+        assert str(exc_info.value) == "Persistent failure"
         
-    def test_run_pipeline_with_recovery_reraises_non_recoverable_errors(self):
-        """Test that non-recoverable errors are re-raised immediately."""
+    def test_run_pipeline_with_recovery_handles_pipeline_step_failed(self):
+        """Test that PipelineStepFailed exceptions are handled correctly."""
         mock_pipeline = Mock()
         
-        # Fail with a different type of error
-        other_error = PipelineStepFailed(
-            mock_pipeline, "normalize", "test_load_id", 
-            ValueError("Some other error"), 
-            None
-        )
-        mock_pipeline.run.side_effect = other_error
-        
-        mock_resources = [Mock()]
-        
-        with pytest.raises(PipelineStepFailed):
-            _run_pipeline_with_recovery(mock_pipeline, mock_resources)
-            
-        # Should not retry for non-recoverable errors
-        assert mock_pipeline.run.call_count == 1
-        assert mock_pipeline.drop_pending_packages.call_count == 0
-        
-    def test_run_pipeline_with_recovery_handles_recovery_method_failures(self):
-        """Test that recovery continues even if recovery methods fail."""
-        mock_pipeline = Mock()
-        
-        # First call fails, recovery methods fail, second call succeeds
-        table_error = PipelineStepFailed(
+        # First call fails with PipelineStepFailed, second succeeds
+        step_error = PipelineStepFailed(
             mock_pipeline, "load", "test_load_id", 
-            DatabaseUndefinedRelation("Table with name test does not exist! DELETE FROM"), 
+            Exception("Step failed"), 
             None
         )
-        mock_pipeline.run.side_effect = [table_error, Mock(loads_ids=["recovered_load_id"])]
-        mock_pipeline.drop_pending_packages.side_effect = Exception("Recovery failed")
-        mock_pipeline.sync_destination.side_effect = Exception("Sync failed")
+        mock_pipeline.run.side_effect = [step_error, Mock(loads_ids=["recovered_load_id"])]
         
         mock_resources = [Mock()]
         
         result = _run_pipeline_with_recovery(mock_pipeline, mock_resources)
         
-        # Should still retry even though recovery methods failed
+        # Should retry and succeed
         assert mock_pipeline.run.call_count == 2
         assert result.loads_ids == ["recovered_load_id"]
+        
+    def test_run_pipeline_with_recovery_custom_max_attempts(self):
+        """Test that custom max_attempts parameter works."""
+        mock_pipeline = Mock()
+        
+        # Always fails
+        failure_error = Exception("Custom attempts test")
+        mock_pipeline.run.side_effect = failure_error
+        
+        mock_resources = [Mock()]
+        
+        with pytest.raises(Exception):
+            _run_pipeline_with_recovery(mock_pipeline, mock_resources, max_attempts=3)
+            
+        # Should try 3 times as specified
+        assert mock_pipeline.run.call_count == 3

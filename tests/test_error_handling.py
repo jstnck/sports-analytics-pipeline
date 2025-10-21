@@ -8,7 +8,6 @@ from sports_analytics_pipeline.ingest import (
     IngestionError,
     RateLimiter,
     DEFAULT_API_DELAY,
-    BURST_LIMIT,
 )
 
 
@@ -29,8 +28,6 @@ class TestRateLimiter:
         """Test RateLimiter initializes correctly."""
         limiter = RateLimiter()
         assert limiter.base_delay == DEFAULT_API_DELAY
-        assert limiter.burst_limit == BURST_LIMIT
-        assert limiter.request_count == 0
 
     def test_rate_limiter_basic_delay(self) -> None:
         """Test rate limiter enforces basic delays."""

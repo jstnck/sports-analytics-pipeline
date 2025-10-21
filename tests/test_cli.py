@@ -23,18 +23,18 @@ class TestCLIArgumentParsing:
         """Test valid table names are accepted."""
         valid_tables = ["scoreboard", "game_summary"]
 
-        with patch("main.ingest_date") as mock_ingest:
+        with patch("main.run_espn_source") as mock_run_source:
             with patch(
                 "sys.argv",
                 ["main.py", "--date", "2024-10-23", "--tables", ",".join(valid_tables)],
             ):
                 main.main()
-                # Check that the function was called with the correct table set
-                _, kwargs = mock_ingest.call_args
-                assert isinstance(
-                    kwargs["tables"], set
-                )  # tables argument should be a set
-                assert kwargs["tables"] == set(valid_tables)
+                # Check that the function was called with the correct resource selection
+                _, kwargs = mock_run_source.call_args
+                assert kwargs["include_schedule"] is True
+                assert kwargs["include_game_summary"] is True
+                assert kwargs["include_teams"] is False
+                assert kwargs["include_rosters"] is False
 
     def test_tables_argument_validation_invalid(self) -> None:
         """Test invalid table names are rejected."""
@@ -51,7 +51,7 @@ class TestCLITableSelection:
 
     def test_date_ingestion_with_table_selection(self) -> None:
         """Test date ingestion with specific tables."""
-        with patch("main.ingest_date") as mock_ingest:
+        with patch("main.run_espn_source") as mock_run_source:
             with patch(
                 "sys.argv",
                 [
@@ -59,19 +59,20 @@ class TestCLITableSelection:
                     "--date",
                     "2024-10-23",
                     "--tables",
-                    "scoreboard,game_summary",
+                    "teams,scoreboard",
                 ],
             ):
                 main.main()
-
-                _, kwargs = mock_ingest.call_args
-
-                assert str(kwargs["target_date"]) == "2024-10-23"
-                assert kwargs["tables"] == {"scoreboard", "game_summary"}
+                # Check that only selected resources are included
+                _, kwargs = mock_run_source.call_args
+                assert kwargs["include_teams"] is True
+                assert kwargs["include_rosters"] is False 
+                assert kwargs["include_schedule"] is True
+                assert kwargs["include_game_summary"] is False
 
     def test_backfill_with_table_selection(self) -> None:
         """Test backfill with specific tables."""
-        with patch("main.backfill_box_scores") as mock_backfill:
+        with patch("main.run_espn_source") as mock_run_source:
             with patch(
                 "sys.argv",
                 [
@@ -88,12 +89,15 @@ class TestCLITableSelection:
             ):
                 main.main()
 
-                # Check that backfill_box_scores was called with correct arguments
-                mock_backfill.assert_called_once()
-                _, kwargs = mock_backfill.call_args
+                # Check that run_espn_source was called with correct resource selection
+                mock_run_source.assert_called_once()
+                _, kwargs = mock_run_source.call_args
 
                 assert kwargs["season_end_year"] == 2025
-                assert kwargs["tables"] == {"game_summary"}
+                assert kwargs["include_game_summary"] is True
+                assert kwargs["include_schedule"] is False
+                assert kwargs["include_teams"] is False
+                assert kwargs["include_rosters"] is False
 
 
 class TestCLIErrorHandling:
